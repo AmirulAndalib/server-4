@@ -17,4 +17,5 @@
       "depth": 2
     }
   ]
+  "ruff.configuration": "${workspaceFolder}/pyproject.toml",
 }
