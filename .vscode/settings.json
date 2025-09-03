@@ -1,4 +1,14 @@
 {
+  "python.analysis.extraPaths": [
+    "../models/"
+  ],
+  "python.analysis.packageIndexDepths": [
+    {
+      "name": "music_assistant_models",
+      "depth": 2
+    }
+  ],
+  // Keep settings below this line in sync with with .devcontainer/devcontainer.json
   "[python]": {
     "editor.formatOnSave": true,
     "editor.codeActionsOnSave": {
@@ -10,12 +20,5 @@
   "[github-actions-workflow]": {
     "editor.defaultFormatter": "esbenp.prettier-vscode"
   },
-  "python.analysis.extraPaths": ["../models/"],
-  "python.analysis.packageIndexDepths": [
-    {
-      "name": "music_assistant_models",
-      "depth": 2
-    }
-  ]
   "ruff.configuration": "${workspaceFolder}/pyproject.toml",
 }
