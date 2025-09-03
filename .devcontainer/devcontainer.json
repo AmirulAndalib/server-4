@@ -1,0 +1,54 @@
+{
+  "name": "Music Assistant",
+  "context": "..",
+  "dockerFile": "Dockerfile",
+  "postCreateCommand": "git config --global --add safe.directory ${containerWorkspaceFolder}",
+  "postStartCommand": "./scripts/setup.sh",
+  "runArgs": [
+    // Recommended options for the docker install of music assistant
+    "--network=host",
+    "--cap-add=DAC_READ_SEARCH",
+    "--cap-add=SYS_ADMIN",
+    "--security-opt",
+    "apparmor:unconfined",
+    // Increase file limit, makes vscode server a bit more reliable
+    "--ulimit",
+    "nofile=80000:80000",
+    // Use vscode as git editor
+    "-e",
+    "GIT_EDITOR=code --wait"
+  ],
+  "appPort": [
+    "8095:8095", // Builtin frontend
+    "8097:8097" // Stream server
+  ],
+  // if you want to access a local music library, you can mount it here
+  // "mounts": [
+  //   "source=/path/to/local/library,target=/music,type=bind,consistency=cached,readonly"
+  // ],
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "charliermarsh.ruff",
+        "esbenp.prettier-vscode"
+      ],
+      "settings": {
+        "python.venvPath": "/home/mass/.local/music-assistant-venv",
+        // Keep up to date with .vscode/settings.json:
+        "[python]": {
+          "editor.formatOnSave": true,
+          "editor.codeActionsOnSave": {
+            "source.fixAll": "explicit",
+            "source.organizeImports": "explicit"
+          }
+        },
+        "editor.defaultFormatter": "charliermarsh.ruff",
+        "[github-actions-workflow]": {
+          "editor.defaultFormatter": "esbenp.prettier-vscode"
+        },
+        "ruff.configuration": "${workspaceFolder}/pyproject.toml"
+      }
+    }
+  }
+}
