@@ -25,5 +25,3 @@ RUN uv pip install \
     -r requirements_all.txt
 
 ENV SHELL=/bin/bash
-
-VOLUME [ "/home/mass/.musicassistant" ]

@@ -22,10 +22,13 @@
     "8095:8095", // Builtin frontend
     "8097:8097" // Stream server
   ],
-  // if you want to access a local music library, you can mount it here
-  // "mounts": [
-  //   "source=/path/to/local/library,target=/music,type=bind,consistency=cached,readonly"
-  // ],
+  // Mount for persistent data directory and optional local music library
+  "mounts": [
+    // Persist Music Assistant data across container rebuilds
+    "source=.musicassistant,target=/home/mass/.musicassistant,type=volume"
+    // if you want to access a local music library, you can mount it here
+    // "source=/path/to/local/library,target=/music,type=bind,consistency=cached,readonly"
+  ],
   "customizations": {
     "vscode": {
       "extensions": [
