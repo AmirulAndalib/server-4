@@ -23,6 +23,14 @@ With this repository cloned locally, execute the following commands in a termina
 NOTE: Always re-run the setup script after you fetch the latest code because requirements could have changed.
 
 ### Using Devcontainer/Codespace
+* Using Codespace: Create/open your Codespace, and wait for the creation
+* Using VSCode Dev Container locally: `Dev Containers: Open Folder in Container...`, select the root of the project, and wait for the creation
+* Once VSCode has loaded, after a few seconds a terminal should pop with `Running postCreateCommand...`. Wait for the dependencies to install. You can monitor it with `Codespaces: View Creation Log`
+* Select the right Python interpreter with `Python: Select Interpreter`, and choose `./.venv/bin/python`
+* Hit (Fn +) F5 to start Music Assistant locally
+* Go to the `PORTS` tab in the bottom panel, open the `Forwarded Address` for the port `8095` to access the pre-compiled UI of Music Assistant 🎉
+
+### Using Devcontainer/Codespace
 We removed support for devcontainers because we do not have anyone willing to maintain it.
 It also is not very convenient due to all the port requirements, binaries etc.
 If somebody is willing to create and maintain a devcontainer with host networking and based on our base alpine image, we will add the support back. Until then: Develop with Python venv on a Linux or macOS machine (see above).
