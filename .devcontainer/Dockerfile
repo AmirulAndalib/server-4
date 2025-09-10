@@ -2,15 +2,19 @@ ARG BASE_IMAGE_VERSION=latest
 
 FROM ghcr.io/music-assistant/base:$BASE_IMAGE_VERSION
 
-RUN apk add --no-cache git zsh bash github-cli
+RUN apk add --no-cache git zsh bash github-cli sudo lsof
 
 RUN git config --system --add safe.directory "*"
 
 RUN pip install --upgrade pip && \
     pip install --upgrade uv
 
-RUN adduser mass -D -G wheel
+RUN adduser mass -D -G wheel && \
+    echo "mass ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/mass
 USER mass
+
+# Pre-create the .musicassistant directory with proper permissions
+RUN mkdir -p /home/mass/.musicassistant
 
 ENV VIRTUAL_ENV=/home/mass/.local/music-assistant-venv
 RUN uv venv $VIRTUAL_ENV

@@ -1,84 +1,21 @@
 {
-  // TODO: add notes:
-  // - enable host networking in docker desktop (windows)
-  // - add note for windows users to use lr line endings:
-  //   git config core.eol lf
-  //   git config core.autocrlf input
-  // then
+  // Music Assistant Development Container
+  // 
+  // Windows Users: Before using this devcontainer, configure Git line endings:
+  //   git config --global core.eol lf
+  //   git config --global core.autocrlf input
+  // 
+  // If you already have the repository cloned with CRLF endings:
   //   git rm -rf --cached .
   //   git reset --hard HEAD
-  // WARNING: this will reset changes:
-  "portsAttributes": {
-    "8095": {
-      "label": "Frontend",
-      "onAutoForward": "notify"
-    },
-    "*": {
-      // TODO: there are some ports that break vscode for some reason on autoforward, like:
-      // [78396 ms] Port forwarding 57304 > 44941 > 46345 stderr: Error: connect ECONNREFUSED 127.0.0.1:46345
-      // at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1637:16)
-      // [78397 ms] Port forwarding 57304 > 44941 > 46345 stderr: Remote close with error
-      // [78406 ms] Port forwarding 57304 > 44941 > 46345 terminated with code 1 and signal null.
-      // [78407 ms] Port forwarding 57304 > 44941 > 46345: Local close
-      // pre-commit installed at .git/hooks/pre-commit
-      // [88262 ms] Start: Reconnection attempt 4
-      // [88262 ms] CLIHost does not need reconnection.
-      // [88263 ms] Start: Run: docker inspect --type container fe364ffedf1671e2eb8ae67f6b300540ee02ea31418ccea2c231a861e15070c9
-      // [88298 ms] Port forwarding connection from 43082 > 44941 > 46345 in the container.
-      // [88298 ms] Start: Run in container: /home/mass/.vscode-server/bin/6f17636121051a53c88d3e605c491d22af2ba755/node -e
-      // [88429 ms] Port forwarding 43082 > 44941 > 46345 stderr: Error: connect ECONNREFUSED 127.0.0.1:46345
-      //     at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1637:16)
-      // [88429 ms] Port forwarding 43082 > 44941 > 46345 stderr: Remote close with error
-      // [88442 ms] Port forwarding 43082 > 44941 > 46345 terminated with code 1 and signal null.
-      // [88443 ms] Port forwarding 43082 > 44941 > 46345: Local close
-      // [88453 ms] Port forwarding connection from 43098 > 44941 > 46345 in the container.
-      // [88453 ms] Start: Run in container: /home/mass/.vscode-server/bin/6f17636121051a53c88d3e605c491d22af2ba755/node -e
-      // [88579 ms] Port forwarding 43098 > 44941 > 46345 stderr: Error: connect ECONNREFUSED 127.0.0.1:46345
-      //     at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1637:16)
-      // [88579 ms] Port forwarding 43098 > 44941 > 46345 stderr: Remote close with error
-      // [88588 ms] Port forwarding 43098 > 44941 > 46345 terminated with code 1 and signal null.
-      // [88588 ms] Port forwarding 43098 > 44941 > 46345: Local close
-      // [98447 ms] Start: Reconnection attempt 5
-      // [98448 ms] CLIHost does not need reconnection.
-      // [98448 ms] Start: Run: docker inspect --type container fe364ffedf1671e2eb8ae67f6b300540ee02ea31418ccea2c231a861e15070c9
-      // [98484 ms] Port forwarding connection from 37824 > 44941 > 46345 in the container.
-      // [98484 ms] Start: Run in container: /home/mass/.vscode-server/bin/6f17636121051a53c88d3e605c491d22af2ba755/node -e
-      // [98608 ms] Port forwarding 37824 > 44941 > 46345 stderr: Error: connect ECONNREFUSED 127.0.0.1:46345
-      //     at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1637:16)
-      // [98608 ms] Port forwarding 37824 > 44941 > 46345 stderr: Remote close with error
-      // [98618 ms] Port forwarding 37824 > 44941 > 46345 terminated with code 1 and signal null.
-      // [98618 ms] Port forwarding 37824 > 44941 > 46345: Local close
-      // [98628 ms] Port forwarding connection from 37834 > 44941 > 46345 in the container.
-      // [98629 ms] Start: Run in container: /home/mass/.vscode-server/bin/6f17636121051a53c88d3e605c491d22af2ba755/node -e
-      // [98764 ms] Port forwarding 37834 > 44941 > 46345 stderr: Error: connect ECONNREFUSED 127.0.0.1:46345
-      //     at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1637:16)
-      // [98764 ms] Port forwarding 37834 > 44941 > 46345 stderr: Remote close with error
-      // [98773 ms] Port forwarding 37834 > 44941 > 46345 terminated with code 1 and signal null.
-      // [98774 ms] Port forwarding 37834 > 44941 > 46345: Local close
-      // [108621 ms] Start: Reconnection attempt 6
-      // [108622 ms] CLIHost does not need reconnection.
-      // [108622 ms] Start: Run: docker inspect --type container fe364ffedf1671e2eb8ae67f6b300540ee02ea31418ccea2c231a861e15070c9
-      // [108662 ms] Port forwarding connection from 48410 > 44941 > 46345 in the container.
-      // [108663 ms] Start: Run in container: /home/mass/.vscode-server/bin/6f17636121051a53c88d3e605c491d22af2ba755/node -e
-      // [108804 ms] Port forwarding 48410 > 44941 > 46345 stderr: Error: connect ECONNREFUSED 127.0.0.1:46345
-      //     at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1637:16)
-      // [108804 ms] Port forwarding 48410 > 44941 > 46345 stderr: Remote close with error
-      // [108816 ms] Port forwarding 48410 > 44941 > 46345 terminated with code 1 and signal null.
-      // [108816 ms] Port forwarding 48410 > 44941 > 46345: Local close
-      // [108826 ms] Port forwarding connection from 48414 > 44941 > 46345 in the container.
-      // [108826 ms] Start: Run in container: /home/mass/.vscode-server/bin/6f17636121051a53c88d3e605c491d22af2ba755/node -e
-      // [108960 ms] Port forwarding 48414 > 44941 > 46345 stderr: Error: connect ECONNREFUSED 127.0.0.1:46345
-      //     at TCPConnectWrap.afterConnect [as oncomplete] (node:net:1637:16)Remote close with error
-      // [108970 ms] Port forwarding 48414 > 44941 > 46345 terminated with code 1 and signal null.
-      // [108971 ms] Port forwarding 48414 > 44941 > 46345: Local close
-      "onAutoForward": "ignore"
-    }
-  },
+  // WARNING: The above commands will reset uncommitted changes
+  // 
+  // Docker Desktop on Windows: Enable host networking in settings
   "name": "Music Assistant",
   "context": "..",
   "dockerFile": "Dockerfile",
   "postCreateCommand": "git config --global --add safe.directory ${containerWorkspaceFolder}",
-  "postStartCommand": "./scripts/setup.sh",
+  "postStartCommand": "./.devcontainer/setup-devcontainer.sh",
   "runArgs": [
     // Recommended options for the docker install of music assistant
     "--network=host",
@@ -96,8 +33,8 @@
   // Mount for persistent data directory and optional local music library
   "mounts": [
     // Persist Music Assistant data across container rebuilds
-    // TODO: this doesn't work, windows can't handle the dot, also permission issues at least on window, linux idk
-    "source=.musicassistant,target=/home/mass/.musicassistant,type=volume"
+    // Use a named volume without dots for cross-platform compatibility
+    "source=musicassistant-data,target=/home/mass/.musicassistant,type=volume"
     // if you want to access a local music library, you can mount it here
     // "source=/path/to/local/library,target=/music,type=bind,consistency=cached,readonly"
   ],
@@ -109,7 +46,13 @@
         "esbenp.prettier-vscode"
       ],
       "settings": {
-        "remote.autoForwardPorts": false, // TODO: or this option?
+        "remote.autoForwardPorts": false,
+        "remote.autoForwardPortsSource": "process",
+        "remote.portsAttributes": {
+          "*": {
+            "onAutoForward": "ignore"
+          }
+        },
         "python.venvPath": "/home/mass/.local/music-assistant-venv",
         // Keep up to date with .vscode/settings.json:
         "[python]": {

@@ -23,17 +23,39 @@ With this repository cloned locally, execute the following commands in a termina
 NOTE: Always re-run the setup script after you fetch the latest code because requirements could have changed.
 
 ### Using Devcontainer/Codespace
-* Using Codespace: Create/open your Codespace, and wait for the creation
-* Using VSCode Dev Container locally: `Dev Containers: Open Folder in Container...`, select the root of the project, and wait for the creation
+
+#### Prerequisites for Windows users
+If you are using Windows, you need to configure Git to use LF line endings before cloning the repository:
+```bash
+git config --global core.eol lf
+git config --global core.autocrlf input
+```
+
+If you already have the repository cloned with CRLF line endings, run these commands to fix it:
+```bash
+git rm -rf --cached .
+git reset --hard HEAD
+```
+**WARNING: This will reset any uncommitted changes.**
+
+For Docker Desktop on Windows, make sure to enable host networking in the Docker Desktop settings.
+
+#### Setup Instructions
+* **Using GitHub Codespace**: Create/open your Codespace, and wait for the creation
+* **Using VSCode Dev Container locally**: 
+  1. Open VSCode and use `Dev Containers: Open Folder in Container...`
+  2. Select the root of the project, and wait for the creation
+  3. The devcontainer will automatically set up the environment with host networking enabled
 * Once VSCode has loaded, after a few seconds a terminal should pop with `Running postCreateCommand...`. Wait for the dependencies to install. You can monitor it with `Codespaces: View Creation Log`
 * Select the right Python interpreter with `Python: Select Interpreter`, and choose `./.venv/bin/python`
 * Hit (Fn +) F5 to start Music Assistant locally
-* Go to the `PORTS` tab in the bottom panel, open the `Forwarded Address` for the port `8095` to access the pre-compiled UI of Music Assistant 🎉
+* Open your browser and navigate to `http://localhost:8095` to access the pre-compiled UI of Music Assistant 🎉
 
-### Using Devcontainer/Codespace
-We removed support for devcontainers because we do not have anyone willing to maintain it.
-It also is not very convenient due to all the port requirements, binaries etc.
-If somebody is willing to create and maintain a devcontainer with host networking and based on our base alpine image, we will add the support back. Until then: Develop with Python venv on a Linux or macOS machine (see above).
+#### Notes
+* The devcontainer uses host networking for better compatibility with Music Assistant's networking requirements
+* A persistent volume is used to store Music Assistant configuration across container rebuilds
+* **No port forwarding is used** - access the UI directly at `http://localhost:8095` due to host networking
+* Port conflicts are automatically resolved during container startup
 
 ### Developing on the Music Assistant Server Models
 
