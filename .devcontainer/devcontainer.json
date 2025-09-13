@@ -46,13 +46,6 @@
         "esbenp.prettier-vscode"
       ],
       "settings": {
-        "remote.autoForwardPorts": false,
-        "remote.autoForwardPortsSource": "process",
-        "remote.portsAttributes": {
-          "*": {
-            "onAutoForward": "ignore"
-          }
-        },
         "python.venvPath": "/home/mass/.local/music-assistant-venv",
         // Keep up to date with .vscode/settings.json:
         "[python]": {
