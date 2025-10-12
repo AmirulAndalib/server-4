@@ -1,0 +1,11 @@
+{
+  "type": "player",
+  "domain": "local_audio_player",
+  "stage": "beta",
+  "name": "Local Audio Player",
+  "description": "Play to any local hardware playback device.",
+  "codeowners": ["@ozgav"],
+  "documentation": "",
+  "multi_instance": false,
+  "requirements": ["numpy>=2.3.2","sounddevice>=0.5.2"]
+}
