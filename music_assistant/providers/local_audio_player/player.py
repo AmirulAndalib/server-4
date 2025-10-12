@@ -220,12 +220,12 @@ class LocalSoundcardPlayer(Player):
 
     async def seek(self, position: int) -> None:
         """Handle SEEK command."""
-        if not self.current_media or not self.current_media.queue_id:
+        if not self.current_media or not self.current_media.queue_item_id:
             raise PlayerCommandFailed("No media loaded for seeking")
 
         # For flow streams, seeking is handled by restarting the stream at the seek position
         # The queue controller will handle this via play_index
-        await self.mass.player_queues.seek(self.current_media.queue_id, position)
+        await self.mass.player_queues.seek(self.current_media.queue_item_id, position)
 
     async def play_media(self, media: PlayerMedia) -> None:
         """Handle PLAY MEDIA command using MA standard architecture."""
