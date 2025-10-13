@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
+from time import time
 from typing import TYPE_CHECKING, Any
 
 from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption
@@ -357,7 +358,10 @@ class LocalSoundcardPlayer(Player):
         self._attr_current_media = media
         self._attr_playback_state = PlaybackState.PLAYING
         self._attr_active_source = qid
-        # In flow mode, queue controller tracks elapsed time based on stream log
+        # In flow mode, set elapsed time to 0 and timestamp
+        # corrected_elapsed_time property will calculate real-time advancement
+        self._attr_elapsed_time = 0
+        self._attr_elapsed_time_last_updated = time()
 
         if start_queue_item.media_item:
             self._attr_stream_title = start_queue_item.name
