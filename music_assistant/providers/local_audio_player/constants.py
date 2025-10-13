@@ -18,6 +18,6 @@ AUDIO_FORMAT: Final[str] = "float32"  # 32-bit float for high quality
 AUDIO_LATENCY: Final[str] = "low"  # Low latency for real-time playback
 
 # Queue and streaming constants
-MAX_AUDIO_QUEUE_SIZE: Final[int] = 200  # Maximum chunks in audio queue
+MAX_AUDIO_QUEUE_SIZE: Final[int] = 500  # Maximum chunks in audio queue
 CLEANUP_TIMEOUT: Final[float] = 10.0  # Timeout for cleanup operations
 POWER_CYCLE_DELAY: Final[float] = 0.5  # Delay between power off/on cycles

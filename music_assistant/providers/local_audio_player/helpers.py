@@ -121,7 +121,7 @@ class AudioStreamHandler:
         self._stream: sd.OutputStream | None = None
 
     async def start(self) -> None:
-        """Start the audio stream."""
+        """Start the audio stream (but in paused state until play() is called)."""
         if self._stream is not None:
             return
 
@@ -134,15 +134,15 @@ class AudioStreamHandler:
                     samplerate=self.sample_rate,
                     channels=self.channels,
                     dtype=self.dtype,
-                    blocksize=self._buffer_size,
+                    blocksize=1024,  # Small blocksize for responsive volume/control changes
                     latency=AUDIO_LATENCY,
                     callback=self._audio_callback,
                 )
                 self._stream.start()
 
             await loop.run_in_executor(None, _start_stream)
-            self._is_playing = True
-            _LOGGER.debug("Started audio stream on device %s", self.device_id)
+            # Don't set _is_playing here - wait for explicit play() call
+            _LOGGER.debug("Started audio stream on device %s (paused)", self.device_id)
 
         except (OSError, ValueError, RuntimeError) as err:
             raise AudioError(f"Failed to start audio stream: {err}") from err
@@ -183,6 +183,13 @@ class AudioStreamHandler:
     def pause(self) -> None:
         """Pause audio playback."""
         self._is_playing = False
+
+    def clear_buffer(self) -> None:
+        """Clear the audio buffer without stopping the stream."""
+        self._bytes_buffer = b""
+        with self._lock:
+            self._audio_buffer.clear()
+        _LOGGER.debug("Cleared audio buffer")
 
     async def write_audio(self, data: bytes) -> None:
         """Write audio bytes to the queue, aligning to frame boundaries."""
@@ -233,7 +240,7 @@ class AudioStreamHandler:
         return self.write_audio
 
     def _audio_callback(
-        self, outdata: np.ndarray, frames: int, time: Any, status: sd.CallbackFlags
+        self, outdata: np.ndarray, frames: int, _time: Any, status: sd.CallbackFlags
     ) -> None:
         """Sounddevice callback to fill output buffer."""
         if status:

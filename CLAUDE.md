@@ -17,14 +17,19 @@ Music Assistant is a (async) Python 3 based music library manager that connects 
 ## Development Commands
 
 ### Setup and Dependencies
-- `scripts/setup.sh` - Initial development setup (creates venv, installs dependencies, configures pre-commit)
+- `scripts/setup.sh` - Initial development setup (creates venv using uv, installs dependencies, configures pre-commit)
 - Always re-run after pulling latest code as requirements may change
+- Requires `uv` package manager to be installed: `curl -LsSf https://astral.sh/uv/install.sh | sh`
 
 ### Testing and Quality
 - `pytest` - Run all tests
 - `pytest tests/specific_test.py` - Run a specific test file
+- `pytest tests/specific_test.py::test_function_name` - Run a specific test function
 - `pytest --cov music_assistant` - Run tests with coverage (configured in pyproject.toml)
-- `pre-commit run --all-files` - Run all pre-commit hooks
+- `pre-commit run --all-files` - Run all pre-commit hooks (ruff, mypy, codespell, etc.)
+- `ruff check --fix` - Run ruff linter with auto-fix
+- `ruff format` - Run ruff formatter
+- `mypy` - Run type checker (strict configuration with some exclusions in pyproject.toml)
 
 Always run `pre-commit run --all-files` after a code change to ensure the new code adheres to the project standards.
 
@@ -76,10 +81,20 @@ Providers are modular components that extend Music Assistant's capabilities:
 Each provider has (at least):
 - `__init__.py` - Main provider logic
 - `manifest.json` - Provider metadata and configuration schema
-- many providers choose to split up the code into several smaller files for readability and maintenance.
+- Many providers split code into multiple files for readability and maintenance
 
-Template providers are available in `_demo_*_provider` directories.
-These demo/example implementations have a lot of docstrings and comments to help you setup a new provider.
+**Template providers** are available in `_demo_*_provider` directories:
+- `_demo_music_provider` - Template for music/streaming service providers
+- `_demo_player_provider` - Template for player/speaker providers
+- `_demo_plugin_provider` - Template for plugin providers
+
+These demo/example implementations have extensive docstrings and comments to help you setup a new provider.
+
+**When working with providers:**
+- Always reference existing provider implementations as examples
+- Check the base classes in `music_assistant/models/` for required methods
+- Provider manifest.json defines configuration schema and metadata
+- All provider methods should be async (use asyncio patterns)
 
 ### Data Flow
 
@@ -90,20 +105,21 @@ These demo/example implementations have a lot of docstrings and comments to help
 
 ## Key Configuration
 
-- **Python**: 3.12+ required
+- **Python**: 3.12+ required (3.13 also supported)
 - **Dependencies**: Defined in `pyproject.toml`
-- **Database**: SQLite via aiosqlite
-- **Async**: Heavy use of asyncio throughout codebase
+- **Database**: SQLite via aiosqlite (async database operations)
 - **External Dependencies**: ffmpeg (v6.1+), various provider-specific binaries
 
 ## Development Notes
 
-- Uses ruff for linting/formatting (config in pyproject.toml)
-- Type checking with mypy (strict configuration)
-- Pre-commit hooks for code quality
-- Test framework: pytest with async support
-- Docker-based deployment (not standalone pip package)
-- VS Code launch configurations provided for debugging
+- **Linting/Formatting**: ruff (config in pyproject.toml)
+- **Type Checking**: mypy with strict configuration (many existing files excluded via pyproject.toml)
+- **Pre-commit Hooks**: Extensive hooks for code quality (ruff, mypy, codespell, JSON/TOML validation, etc.)
+- **Test Framework**: pytest with async support (pytest-aiohttp for web testing, syrupy for snapshots)
+- **Package Manager**: uv (modern, fast Python package manager)
+- **Deployment**: Docker-based only (not standalone pip package due to external dependencies like ffmpeg)
+- **VS Code**: Launch configurations provided for debugging server and tests
+- **Async**: Heavy use of asyncio throughout codebase - all I/O operations are async
 
 ## Branching Strategy
 
