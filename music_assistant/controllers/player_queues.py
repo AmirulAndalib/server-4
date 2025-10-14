@@ -757,21 +757,30 @@ class PlayerQueuesController(CoreController):
         queue = self._queues[queue_id]
         queue_items = self._queue_items[queue_id]
         resume_item = queue.current_item
+        self.logger.info("Resuming queue %s. Item: %s. Res", queue.display_name, resume_item)
         if queue.state == PlaybackState.PLAYING:
             # resume requested while already playing,
             # use current position as resume position
             resume_pos = queue.corrected_elapsed_time
             fade_in = False
+            self.logger.info("1")
+            self.logger.info("Resume pos: %s", resume_pos)
         else:
             resume_pos = queue.resume_pos or queue.elapsed_time
+            self.logger.info("2")
+            self.logger.info("Resume pos: %s", resume_pos)
 
         if not resume_item and queue.current_index is not None and len(queue_items) > 0:
             resume_item = self.get_item(queue_id, queue.current_index)
             resume_pos = 0
+            self.logger.info("3")
+            self.logger.info("Resume item: %s", resume_item)
         elif not resume_item and queue.current_index is None and len(queue_items) > 0:
             # items available in queue but no previous track, start at 0
             resume_item = self.get_item(queue_id, 0)
             resume_pos = 0
+            self.logger.info("4")
+            self.logger.info("Resume item: %s", resume_item)
 
         if resume_item is not None:
             queue_player = self.mass.players.get(queue_id)
