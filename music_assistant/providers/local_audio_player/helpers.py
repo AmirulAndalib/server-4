@@ -247,10 +247,6 @@ class AudioStreamHandler:
         if not self.is_playing or self.muted:
             return
 
-        buffer_size = len(self._audio_buffer)
-        if buffer_size < 10:
-            _LOGGER.debug("Buffer running low: %d chunks", buffer_size)
-
         frames_written = 0
         with self._lock:
             while frames_written < frames and self._audio_buffer:
