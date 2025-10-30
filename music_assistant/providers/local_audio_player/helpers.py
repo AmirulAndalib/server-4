@@ -6,25 +6,21 @@ import asyncio
 import logging
 import threading
 from collections import deque
-from typing import TYPE_CHECKING, Any, cast
+from typing import Any, cast
 
 import numpy as np
 import sounddevice as sd
 from music_assistant_models.errors import AudioError, SetupFailedError
 
-from music_assistant.constants import DEFAULT_PCM_FORMAT
+from music_assistant.constants import INTERNAL_PCM_FORMAT
 
-from .constants import AUDIO_FORMAT, AUDIO_LATENCY, MAX_AUDIO_QUEUE_SIZE
-
-if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
 _LOGGER = logging.getLogger(__name__)
 
 
 async def get_available_devices() -> list[dict[str, Any]]:
     """Get list of available audio output devices."""
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         devices = await loop.run_in_executor(None, sd.query_devices)
 
         output_devices = []
@@ -58,14 +54,14 @@ async def test_device_compatibility(
 ) -> bool:
     """Test if a device is compatible with the given parameters."""
     if sample_rate is None:
-        sample_rate = DEFAULT_PCM_FORMAT.sample_rate
+        sample_rate = INTERNAL_PCM_FORMAT.sample_rate
     if channels is None:
-        channels = DEFAULT_PCM_FORMAT.channels
+        channels = INTERNAL_PCM_FORMAT.channels
     if audio_format is None:
-        audio_format = AUDIO_FORMAT
+        audio_format = "float32"
 
     try:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
 
         def _test_device() -> bool:
             """Test device in executor."""
@@ -76,7 +72,7 @@ async def test_device_compatibility(
                     samplerate=sample_rate,
                     channels=channels,
                     dtype=dtype,
-                    latency=AUDIO_LATENCY,
+                    latency="low",
                 ):
                     pass
                 return True
@@ -92,25 +88,24 @@ async def test_device_compatibility(
 
 
 class AudioStreamHandler:
-    """Handles streaming audio data to sounddevice."""
+    """Handles streaming audio data to sounddevice with minimal GIL interaction."""
 
     def __init__(
         self,
         device_id: int | None = None,
         sample_rate: int | None = None,
         channels: int | None = None,
-        dtype: np.dtype | None = None,
-        buffer_size: int = 1024,
+        buffer_size: int = 4096,
     ):
         """Initialize the audio stream handler."""
         self.device_id = device_id
-        self.sample_rate = sample_rate or DEFAULT_PCM_FORMAT.sample_rate
-        self.channels = channels or DEFAULT_PCM_FORMAT.channels
-        self.dtype = np.dtype(AUDIO_FORMAT) if dtype is None else dtype
+        self.sample_rate = sample_rate or INTERNAL_PCM_FORMAT.sample_rate
+        self.channels = channels or INTERNAL_PCM_FORMAT.channels
+        self.dtype = np.dtype("float32")
         self._buffer_size = buffer_size
 
-        # Audio queuing system
-        self._audio_buffer: deque[bytes] = deque(maxlen=MAX_AUDIO_QUEUE_SIZE)
+        # Simple circular buffer with thread safety
+        self._audio_buffer: deque[bytes] = deque(maxlen=200)
         self._lock = threading.Lock()
         self._bytes_buffer = b""
 
@@ -121,12 +116,12 @@ class AudioStreamHandler:
         self._stream: sd.OutputStream | None = None
 
     async def start(self) -> None:
-        """Start the audio stream (but in paused state until play() is called)."""
+        """Start the audio stream."""
         if self._stream is not None:
             return
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
 
             def _start_stream() -> None:
                 self._stream = sd.OutputStream(
@@ -134,15 +129,14 @@ class AudioStreamHandler:
                     samplerate=self.sample_rate,
                     channels=self.channels,
                     dtype=self.dtype,
-                    blocksize=1024,  # Small blocksize for responsive volume/control changes
-                    latency=AUDIO_LATENCY,
+                    blocksize=self._buffer_size,
+                    latency="low",
                     callback=self._audio_callback,
                 )
                 self._stream.start()
 
             await loop.run_in_executor(None, _start_stream)
-            # Don't set _is_playing here - wait for explicit play() call
-            _LOGGER.debug("Started audio stream on device %s (paused)", self.device_id)
+            _LOGGER.debug("Started audio stream on device %s", self.device_id)
 
         except (OSError, ValueError, RuntimeError) as err:
             raise AudioError(f"Failed to start audio stream: {err}") from err
@@ -153,7 +147,7 @@ class AudioStreamHandler:
             return
 
         try:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
 
             def _stop_stream() -> None:
                 if self._stream:
@@ -176,6 +170,12 @@ class AudioStreamHandler:
             self._stream = None
             self._is_playing = False
 
+    def clear_buffer(self) -> None:
+        """Clear all buffered audio data."""
+        with self._lock:
+            self._audio_buffer.clear()
+        self._bytes_buffer = b""
+
     def play(self) -> None:
         """Start playing audio."""
         self._is_playing = True
@@ -184,15 +184,8 @@ class AudioStreamHandler:
         """Pause audio playback."""
         self._is_playing = False
 
-    def clear_buffer(self) -> None:
-        """Clear the audio buffer without stopping the stream."""
-        self._bytes_buffer = b""
-        with self._lock:
-            self._audio_buffer.clear()
-        _LOGGER.debug("Cleared audio buffer")
-
-    async def write_audio(self, data: bytes) -> None:
-        """Write audio bytes to the queue, aligning to frame boundaries."""
+    def write_audio(self, data: bytes) -> None:
+        """Write audio bytes to the buffer - synchronous for subprocess pipe reading."""
         frame_size = self.dtype.itemsize * self.channels
         self._bytes_buffer += data
 
@@ -235,22 +228,23 @@ class AudioStreamHandler:
         with self._lock:
             return len(self._audio_buffer)
 
-    def get_output_writer(self) -> Callable[[bytes], Awaitable[None]]:
-        """Get a callable for writing audio data directly."""
-        return self.write_audio
-
     def _audio_callback(
-        self, outdata: np.ndarray, frames: int, _time: Any, status: sd.CallbackFlags
+        self, outdata: np.ndarray, frames: int, time: Any, status: sd.CallbackFlags
     ) -> None:
-        """Sounddevice callback to fill output buffer."""
+        """Sounddevice callback to fill output buffer - minimal GIL time."""
         if status:
-            _LOGGER.warning("Audio callback status: %s", status)
-
+            _LOGGER.warning(
+                "Audio callback status: %s - queue size: %d", status, len(self._audio_buffer)
+            )
         # Start with silence
         outdata.fill(0)
 
         if not self.is_playing or self.muted:
             return
+
+        buffer_size = len(self._audio_buffer)
+        if buffer_size < 10:
+            _LOGGER.debug("Buffer running low: %d chunks", buffer_size)
 
         frames_written = 0
         with self._lock:
@@ -264,7 +258,6 @@ class AudioStreamHandler:
                 frames_to_write = min(frames_in_chunk, frames - frames_written)
 
                 if frames_to_write > 0:
-                    # Slice only the frames we can write
                     bytes_to_write = frames_to_write * frame_size
                     try:
                         chunk_np = np.frombuffer(chunk[:bytes_to_write], dtype=self.dtype).reshape(

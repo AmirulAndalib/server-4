@@ -1,36 +1,44 @@
-"""Local Soundcard Player implementation following MA standard architecture."""
+"""Local Soundcard Player implementation using FFmpeg subprocess."""
 
 from __future__ import annotations
 
 import asyncio
 import contextlib
 import logging
-from time import time
-from typing import TYPE_CHECKING, Any
+import time
+from typing import TYPE_CHECKING, Any, cast
 
-from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption
-from music_assistant_models.enums import ConfigEntryType, PlaybackState, PlayerFeature, PlayerType
+from music_assistant_models.config_entries import ConfigEntry
+from music_assistant_models.enums import (
+    ConfigEntryType,
+    PlaybackState,
+    PlayerFeature,
+    PlayerType,
+)
 from music_assistant_models.errors import AudioError, PlayerCommandFailed, SetupFailedError
 from music_assistant_models.player import DeviceInfo, PlayerMedia
 
 from music_assistant.constants import (
     CONF_ENTRY_FLOW_MODE_ENFORCED,
-    DEFAULT_PCM_FORMAT,
+    INTERNAL_PCM_FORMAT,
     create_sample_rates_config_entry,
 )
+from music_assistant.helpers.util import TaskManager
 from music_assistant.models.player import Player
 
 from .constants import CLEANUP_TIMEOUT, CONF_DEVICE_ID, CONF_READ_AHEAD_BUFFER
-from .helpers import AudioStreamHandler, get_available_devices, test_device_compatibility
+from .helpers import AudioStreamHandler, test_device_compatibility
 
 if TYPE_CHECKING:
+    from music_assistant_models.config_entries import ConfigValueType
+
     from .provider import LocalSoundcardProvider
 
 _LOGGER = logging.getLogger(__name__)
 
 
 class LocalSoundcardPlayer(Player):
-    """Local Soundcard Player following MA standard architecture."""
+    """Local Soundcard Player using FFmpeg subprocess for GIL-free audio."""
 
     def __init__(
         self,
@@ -44,6 +52,10 @@ class LocalSoundcardPlayer(Player):
         self._device_info_data = device_info
         self._audio_handler: AudioStreamHandler | None = None
         self._stream_task: asyncio.Task[None] | None = None
+        self._ffmpeg_proc: asyncio.subprocess.Process | None = None
+        self._elapsed_time_task: asyncio.Task[None] | None = None
+        self._playback_start_time: float | None = None
+        self._paused_elapsed_time: float | None = None
         self._shutdown_event = asyncio.Event()
 
         # Set player attributes
@@ -54,7 +66,8 @@ class LocalSoundcardPlayer(Player):
         self._attr_playback_state = PlaybackState.IDLE
         self._attr_volume_level: int | None = 100
         self._attr_volume_muted: bool | None = False
-
+        self._attr_needs_poll = True
+        self._attr_poll_interval = 1
         # Set device info
         self._attr_device_info = DeviceInfo(
             model=device_info.get("name", "Unknown Audio Device"),
@@ -69,22 +82,13 @@ class LocalSoundcardPlayer(Player):
             PlayerFeature.PAUSE,
         }
 
-    async def get_config_entries(self) -> list[ConfigEntry]:
+    async def get_config_entries(
+        self,
+        action: str | None = None,
+        values: dict[str, ConfigValueType] | None = None,
+    ) -> list[ConfigEntry]:
         """Return player-specific config entries."""
-        base_entries = await super().get_config_entries()
-
-        # Get available devices for selection
-        try:
-            devices = await get_available_devices()
-            device_options = [
-                ConfigValueOption(
-                    title=f"{device['name']} ({device['channels']} channels)", value=device["id"]
-                )
-                for device in devices
-            ]
-        except (AudioError, SetupFailedError) as err:
-            _LOGGER.warning("Failed to get device options: %s", err)
-            device_options = []
+        base_entries = await super().get_config_entries(action=action, values=values)
 
         return [
             *base_entries,
@@ -94,26 +98,35 @@ class LocalSoundcardPlayer(Player):
                 supported_bit_depths=[16, 24, 32],
             ),
             ConfigEntry(
-                key=CONF_DEVICE_ID,
-                type=ConfigEntryType.STRING,
-                label="Audio Device",
-                description="Select the audio output device to use",
-                default_value=self._device_info_data.get("id", 0),
-                required=True,
-                options=device_options,
-            ),
-            ConfigEntry(
                 key=CONF_READ_AHEAD_BUFFER,
                 type=ConfigEntryType.INTEGER,
-                label="Buffer Size (ms)",
+                label="Read Buffer Size (KB)",
                 description=(
-                    "Audio buffer size in milliseconds (higher = more stable, lower = less latency)"
+                    "Size of read buffer for FFmpeg subprocess in kilobytes. "
+                    "Higher values provide more stability but slightly more latency."
                 ),
-                default_value=2000,
+                default_value=256,
                 required=True,
-                range=(500, 5000),
+                range=(64, 1024),
             ),
         ]
+
+    async def poll(self) -> None:
+        """Poll player for state updates."""
+        await self.update_attributes()
+
+    async def update_attributes(self) -> None:
+        """Update player attributes during playback."""
+        # Update elapsed time if playing
+        if (
+            self._attr_playback_state == PlaybackState.PLAYING
+            and self._playback_start_time is not None
+        ):
+            self._attr_elapsed_time = time.time() - self._playback_start_time
+            self._attr_elapsed_time_last_updated = time.time()
+
+        # Call update_state once at the end
+        self.update_state()
 
     async def power(self, powered: bool) -> None:
         """Handle POWER command."""
@@ -156,22 +169,32 @@ class LocalSoundcardPlayer(Player):
             await self.power(True)
 
         if not self._audio_handler:
-            raise PlayerCommandFailed("No audio output available for play command")
+            raise PlayerCommandFailed("No audio handler available for play command")
 
         self._attr_playback_state = PlaybackState.PLAYING
 
-        # Resume audio playback
-        # Note: In flow mode, elapsed time is tracked by queue controller
-        self._audio_handler.play()
+        # Resume elapsed time tracking (only if resuming from pause)
+        if self._paused_elapsed_time is not None:
+            self._playback_start_time = time.time() - self._paused_elapsed_time
+            self._attr_elapsed_time = self._paused_elapsed_time
+            self._attr_elapsed_time_last_updated = time.time()
+            self._paused_elapsed_time = None
 
+        # Resume audio playback
+        self._audio_handler.play()
         self.update_state()
 
     async def pause(self) -> None:
         """Handle PAUSE command."""
+        # Calculate elapsed time at pause moment
+        if self._playback_start_time:
+            self._paused_elapsed_time = time.time() - self._playback_start_time
+            self._attr_elapsed_time = self._paused_elapsed_time
+            self._attr_elapsed_time_last_updated = time.time()
+
         self._attr_playback_state = PlaybackState.PAUSED
 
         # Pause audio playback
-        # Note: In flow mode, elapsed time is tracked by queue controller
         if self._audio_handler:
             self._audio_handler.pause()
 
@@ -179,21 +202,28 @@ class LocalSoundcardPlayer(Player):
 
     async def stop(self) -> None:
         """Handle STOP command."""
-        # Cancel stream task
+        # Stop audio handler first
+        if self._audio_handler:
+            try:
+                await self._audio_handler.stop()
+            except AudioError as err:
+                _LOGGER.error("Error stopping audio handler: %s", err)
+
+        # Then cancel the stream
         if self._stream_task and not self._stream_task.done():
             self._stream_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._stream_task
 
-        # Stop audio output
-        if self._audio_handler:
-            await self._audio_handler.stop()
+        # Kill FFmpeg
+        await self._kill_ffmpeg_process()
 
-        # Reset state
+        # Update state
         self._attr_playback_state = PlaybackState.IDLE
         self._attr_current_media = None
         self._attr_active_source = None
-
+        self._attr_elapsed_time = 0
+        self._playback_start_time = None
         self.update_state()
 
     async def seek(self, position: int) -> None:
@@ -204,36 +234,39 @@ class LocalSoundcardPlayer(Player):
         await self.mass.player_queues.seek(self.active_source, position)
 
     async def play_media(self, media: PlayerMedia) -> None:
-        """Handle PLAY MEDIA command using FIFO approach."""
-        # Stop playback and clear buffer before switching tracks
-        if self._audio_handler:
-            self._audio_handler.pause()
-            self._audio_handler.clear_buffer()
+        """Handle PLAY MEDIA command using FFmpeg subprocess."""
+        # Kill existing processes IMMEDIATELY and in parallel
+        if self._ffmpeg_proc or self._stream_task:
+            async with TaskManager(self.mass) as tg:
+                if self._ffmpeg_proc:
+                    tg.create_task(self._kill_ffmpeg_process())
+                if self._stream_task and not self._stream_task.done():
+                    self._stream_task.cancel()
 
-        # Cancel any existing stream
-        if self._stream_task and not self._stream_task.done():
-            self._stream_task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await self._stream_task
+        # Clear audio buffers to prevent glitches between tracks
+        if self._audio_handler:
+            self._audio_handler.clear_buffer()
 
         # Ensure player is powered on
         if not self._attr_powered:
             await self.power(True)
 
-        # Validate media has required information
+        # Validate media
         if not media.queue_item_id:
             raise PlayerCommandFailed("Media must have a queue_item_id for playback")
 
-        # Set current media and state
+        # Set state and start immediately
         self._attr_current_media = media
         self._attr_playback_state = PlaybackState.PLAYING
         self._attr_active_source = self.active_source
-        # In flow mode, queue controller tracks elapsed time, not the player
+        self._attr_elapsed_time = 0
+        self._attr_elapsed_time_last_updated = time.time()
+        self._playback_start_time = time.time()
+        self._paused_elapsed_time = None
         self.update_state()
 
-        # Start streaming using FIFO approach
-        self._stream_task = self.mass.create_task(self._stream_media_standard(media))
-
+        # Start streaming
+        self._stream_task = self.mass.create_task(self._stream_media_subprocess(media))
         self.update_state()
 
     async def on_unload(self) -> None:
@@ -248,16 +281,11 @@ class LocalSoundcardPlayer(Player):
             await self._audio_handler.stop()
             self._audio_handler = None
 
-        # Get configuration values
-        device_id = self._get_validated_config_int(
-            CONF_DEVICE_ID, self._device_info_data.get("id", 0)
-        )
-        buffer_ms = self._get_validated_config_int(CONF_READ_AHEAD_BUFFER, 2000)
-        sample_rate = DEFAULT_PCM_FORMAT.sample_rate
-        channels = DEFAULT_PCM_FORMAT.channels
-
-        # Calculate buffer size in frames from milliseconds
-        buffer_size = int(sample_rate * buffer_ms / 1000)
+        # Get configuration values using base class config access
+        device_id_value = self.config.get_value(CONF_DEVICE_ID, self._device_info_data.get("id", 0))
+        device_id = int(cast("int", device_id_value))
+        sample_rate = INTERNAL_PCM_FORMAT.sample_rate
+        channels = INTERNAL_PCM_FORMAT.channels
 
         # Test device compatibility first
         if not await test_device_compatibility(device_id, sample_rate, channels, "float32"):
@@ -271,10 +299,9 @@ class LocalSoundcardPlayer(Player):
             device_id=device_id,
             sample_rate=sample_rate,
             channels=channels,
-            buffer_size=buffer_size,
         )
 
-        # Start the audio stream but don't start playing yet
+        # Start the audio stream
         await self._audio_handler.start()
 
         # Set initial volume and mute state
@@ -283,20 +310,32 @@ class LocalSoundcardPlayer(Player):
         self._audio_handler.set_muted(self._attr_volume_muted or False)
 
         _LOGGER.info(
-            "Audio handler ready for device %d (%d channels, %d Hz, buffer %d ms)",
+            "Audio handler ready for device %d (%d channels, %d Hz)",
             device_id,
             channels,
             sample_rate,
-            buffer_ms,
         )
 
     async def _cleanup_audio_handler(self) -> None:
-        """Clean up the audio output."""
+        """Clean up the audio handler."""
+        # Kill FFmpeg process
+        if self._ffmpeg_proc:
+            try:
+                self._ffmpeg_proc.kill()
+                await self._ffmpeg_proc.wait()
+            except ProcessLookupError:
+                pass
+            self._ffmpeg_proc = None
+
         # Cancel stream task
         if self._stream_task and not self._stream_task.done():
             self._stream_task.cancel()
-            with contextlib.suppress(TimeoutError, asyncio.CancelledError):
+            with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
                 await asyncio.wait_for(self._stream_task, timeout=CLEANUP_TIMEOUT)
+
+        # Cancel elapsed time task
+        if self._elapsed_time_task and not self._elapsed_time_task.done():
+            self._elapsed_time_task.cancel()
 
         # Stop audio handler
         if self._audio_handler:
@@ -309,9 +348,11 @@ class LocalSoundcardPlayer(Player):
 
         # Reset state
         self._attr_playback_state = PlaybackState.IDLE
+        self._playback_start_time = None
+        self._paused_elapsed_time = None
 
-    async def _stream_media_standard(self, media: PlayerMedia) -> None:
-        """Stream media using MA standard architecture."""
+    async def _stream_media_subprocess(self, media: PlayerMedia) -> None:
+        """Stream media using FFmpeg subprocess - GIL-free audio path."""
         if not self._audio_handler:
             raise PlayerCommandFailed("No audio handler available")
 
@@ -320,49 +361,46 @@ class LocalSoundcardPlayer(Player):
             raise PlayerCommandFailed("No active queue for playback")
 
         try:
-            _LOGGER.debug("Starting MA standard stream for: %s", media.uri)
+            _LOGGER.debug("Starting FFmpeg subprocess stream for: %s", media.uri)
 
+            # Get queue and validate
             queue = self.mass.player_queues.get(qid)
-            start_queue_item = self.mass.player_queues.get_item(qid, media.queue_item_id)
-
             if not queue:
                 raise PlayerCommandFailed(f"Queue not found: {qid}")
+
+            start_queue_item = self.mass.player_queues.get_item(qid, media.queue_item_id)
             if not start_queue_item:
                 raise PlayerCommandFailed(f"Queue item not found: {media.queue_item_id}")
 
-            # Initialize playback state
-            self._init_playback_state(media, qid, start_queue_item)
+            # Set metadata for UI
+            self._set_stream_metadata(start_queue_item, media)
 
-            # Get the audio stream from MA
-            audio_source = self.mass.streams.get_queue_flow_stream(
-                queue=queue,
-                start_queue_item=start_queue_item,
-                pcm_format=DEFAULT_PCM_FORMAT,
-            )
+            # Resolve stream URL from MA
+            stream_url = await self._resolve_stream_url(queue, start_queue_item)
 
-            # Stream audio with pre-buffering
-            await self._consume_audio_stream(audio_source)
+            # Spawn FFmpeg and stream audio
+            await self._stream_from_ffmpeg(stream_url)
 
         except asyncio.CancelledError:
             _LOGGER.debug("Stream cancelled for %s", self.player_id)
+            await self._kill_ffmpeg_process()
             raise
-        except (AudioError, PlayerCommandFailed):
-            raise
-        except Exception as err:
-            _LOGGER.error("Stream failed for %s: %s", self.player_id, err)
+        except (OSError, ConnectionError, BrokenPipeError) as err:
+            _LOGGER.error("Stream I/O error for %s: %s", self.player_id, err)
             await self.stop()
-            raise PlayerCommandFailed(f"Stream failed: {err}") from err
+            raise PlayerCommandFailed(f"Stream I/O error: {err}") from err
+        except (ValueError, RuntimeError) as err:
+            _LOGGER.error("Stream configuration error for %s: %s", self.player_id, err)
+            await self.stop()
+            raise PlayerCommandFailed(f"Stream configuration error: {err}") from err
+        except (AudioError, PlayerCommandFailed):
+            # Already properly formatted errors - just re-raise
+            raise
+        finally:
+            self._ffmpeg_proc = None
 
-    def _init_playback_state(self, media: PlayerMedia, qid: str, start_queue_item: Any) -> None:
-        """Initialize playback state with metadata."""
-        self._attr_current_media = media
-        self._attr_playback_state = PlaybackState.PLAYING
-        self._attr_active_source = qid
-        # In flow mode, set elapsed time to 0 and timestamp
-        # corrected_elapsed_time property will calculate real-time advancement
-        self._attr_elapsed_time = 0
-        self._attr_elapsed_time_last_updated = time()
-
+    def _set_stream_metadata(self, start_queue_item: Any, media: PlayerMedia) -> None:
+        """Set stream metadata for UI display."""
         if start_queue_item.media_item:
             self._attr_stream_title = start_queue_item.name
             self._attr_stream_details = start_queue_item.media_item.metadata.description or ""
@@ -372,66 +410,144 @@ class LocalSoundcardPlayer(Player):
 
         self.update_state()
 
-    async def _consume_audio_stream(self, audio_source: Any) -> None:
-        """Consume audio stream with pre-buffering and real-time pacing."""
-        chunk_count = 0
-        pre_buffer_chunks = 50  # Pre-buffer enough to start smoothly
-        target_buffer_size = 100  # Keep buffer at ~10 seconds during playback
-        _LOGGER.debug("Pre-filling audio buffer...")
+    async def _resolve_stream_url(self, queue: Any, start_queue_item: Any) -> str:
+        """Resolve the stream URL from MA streams controller."""
+        # Validate session_id is not None
+        if queue.session_id is None:
+            raise PlayerCommandFailed("Queue has no session_id")
 
-        # Pre-fill buffer before starting playback
-        async for audio_chunk in audio_source:
-            if not self._audio_handler:
-                break
+        stream_url = await self.mass.streams.resolve_stream_url(
+            session_id=queue.session_id,
+            queue_item=start_queue_item,
+            flow_mode=True,
+            player_id=self.player_id,
+        )
 
-            await self._audio_handler.write_audio(audio_chunk)
-            chunk_count += 1
+        _LOGGER.debug("Stream URL: %s", stream_url)
+        return stream_url
 
-            if chunk_count >= pre_buffer_chunks:
-                _LOGGER.debug("Buffer pre-filled with %d chunks, starting playback", chunk_count)
-                self._audio_handler.play()
-                break
+    async def _stream_from_ffmpeg(self, stream_url: str) -> None:
+        """Stream audio from FFmpeg subprocess to audio handler."""
+        if not self._audio_handler:
+            raise PlayerCommandFailed("Audio handler not initialized")
 
-        # Continue consuming stream with real-time pacing (like ffmpeg -re)
-        # Only consume when buffer needs refilling to prevent over-consumption
-        async for audio_chunk in audio_source:
-            if not self._audio_handler:
-                break
+        try:
+            # Start FFmpeg subprocess
+            self._ffmpeg_proc = await asyncio.create_subprocess_exec(
+                "ffmpeg",
+                "-i",
+                stream_url,
+                "-f",
+                "f32le",
+                "-acodec",
+                "pcm_f32le",
+                "-ar",
+                str(self._audio_handler.sample_rate),
+                "-ac",
+                str(self._audio_handler.channels),
+                "-loglevel",
+                "error",
+                "pipe:1",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
 
-            # Wait if buffer is full enough - this paces consumption to ~real-time
-            # Similar to how ffmpeg -re works
-            while self._audio_handler and self._audio_handler.queue_size >= target_buffer_size:
-                await asyncio.sleep(0.1)  # Check every 100ms
-                if not self._audio_handler:
+            if not self._ffmpeg_proc or not self._ffmpeg_proc.stdout:
+                raise PlayerCommandFailed("Failed to start FFmpeg process")
+
+            _LOGGER.info("FFmpeg subprocess started (PID: %s)", self._ffmpeg_proc.pid)
+
+            # Monitor stderr for errors
+            if self._ffmpeg_proc.stderr:
+                asyncio.create_task(self._monitor_ffmpeg_stderr(self._ffmpeg_proc.stderr))
+
+            # Consume FFmpeg output
+            await self._consume_ffmpeg_stream(
+                self._ffmpeg_proc.stdout,
+                buffer_size_bytes=16384,
+            )
+
+        except asyncio.CancelledError:
+            _LOGGER.debug("Stream task cancelled")
+            raise
+        except Exception as err:
+            _LOGGER.exception("Error in FFmpeg stream: %s", err)
+            raise
+        finally:
+            # Cleanup - save reference before setting to None
+            ffmpeg_proc = self._ffmpeg_proc
+            self._ffmpeg_proc = None
+
+            if ffmpeg_proc and ffmpeg_proc.returncode is None:
+                try:
+                    ffmpeg_proc.kill()
+                    await asyncio.wait_for(ffmpeg_proc.wait(), timeout=2.0)
+                except (TimeoutError, ProcessLookupError):
+                    pass
+
+    async def _monitor_ffmpeg_stderr(self, stderr: asyncio.StreamReader) -> None:
+        """Monitor FFmpeg stderr for errors."""
+        try:
+            while True:
+                line = await stderr.readline()
+                if not line:
                     break
+                error_msg = line.decode("utf-8", errors="replace").strip()
+                if error_msg:
+                    _LOGGER.warning("FFmpeg: %s", error_msg)
+        except asyncio.CancelledError:
+            pass
+
+    async def _consume_ffmpeg_stream(
+        self, stdout: asyncio.StreamReader, buffer_size_bytes: int
+    ) -> None:
+        """Read PCM data from FFmpeg and feed to audio handler."""
+        chunk_count = 0
+        total_bytes = 0
+        playback_started = False
+
+        while True:
+            chunk = await stdout.read(buffer_size_bytes)
+
+            if not chunk:
+                break
+
+            chunk_count += 1
+            total_bytes += len(chunk)
 
             if self._audio_handler:
-                await self._audio_handler.write_audio(audio_chunk)
-                chunk_count += 1
+                try:
+                    self._audio_handler.write_audio(chunk)
+                except (ValueError, TypeError) as err:
+                    _LOGGER.error("Error writing audio chunk: %s", err)
 
-        _LOGGER.debug("Stream completed - consumed %d total chunks", chunk_count)
+                if not playback_started and self._audio_handler.queue_size >= 10:
+                    _LOGGER.debug(
+                        "Buffer pre-filled (%d chunks), starting playback",
+                        self._audio_handler.queue_size,
+                    )
+                    # Start elapsed time tracking NOW when audio actually starts
+                    self._playback_start_time = time.time()
+                    self._attr_elapsed_time = 0
+                    self._attr_elapsed_time_last_updated = time.time()
 
-        # Wait for buffered audio to finish playing
-        if self._audio_handler and self._audio_handler.is_playing:
-            _LOGGER.debug("Waiting for buffered audio to drain...")
-            while self._audio_handler.queue_size > 0:
-                await asyncio.sleep(0.1)
-            _LOGGER.debug("Audio buffer drained")
+                    self._audio_handler.play()
+                    playback_started = True
 
-    def _get_validated_config_int(self, key: str, default: int) -> int:
-        """Get and validate integer configuration value."""
+    async def _kill_ffmpeg_process(self) -> None:
+        """Kill the FFmpeg process gracefully if running."""
+        if not self._ffmpeg_proc:
+            return
+
         try:
-            value = self.config.get_value(key, default)
-            if isinstance(value, (int, float, str)):
-                return int(value)
-            else:
-                _LOGGER.warning(
-                    "Invalid config value type for %s: %s, using default %d",
-                    key,
-                    type(value),
-                    default,
-                )
-                return default
-        except (ValueError, TypeError):
-            _LOGGER.warning("Invalid config value for %s, using default %d", key, default)
-            return default
+            # Try graceful termination first
+            self._ffmpeg_proc.terminate()
+            try:
+                await asyncio.wait_for(self._ffmpeg_proc.wait(), timeout=2.0)
+            except TimeoutError:
+                # Force kill if it doesn't terminate
+                _LOGGER.warning("FFmpeg did not terminate gracefully, forcing kill")
+                self._ffmpeg_proc.kill()
+                await self._ffmpeg_proc.wait()
+        except ProcessLookupError:
+            pass
