@@ -235,6 +235,8 @@ class LocalSoundcardPlayer(Player):
 
     async def play_media(self, media: PlayerMedia) -> None:
         """Handle PLAY MEDIA command using FFmpeg subprocess."""
+        # Ensure audio handler is ready
+        await self._ensure_audio_handler_ready()
         # Kill existing processes IMMEDIATELY and in parallel
         if self._ffmpeg_proc or self._stream_task:
             async with TaskManager(self.mass) as tg:
@@ -551,3 +553,20 @@ class LocalSoundcardPlayer(Player):
                 await self._ffmpeg_proc.wait()
         except ProcessLookupError:
             pass
+
+    async def _ensure_audio_handler_ready(self) -> None:
+        """Ensure audio handler is ready for playback."""
+        if not self._audio_handler:
+            _LOGGER.debug("Audio handler missing, recreating...")
+            await self._setup_audio_handler()
+            return
+
+        # Check if stream is actually running
+        if not self._audio_handler.is_stream_active:
+            _LOGGER.debug("Audio stream not running, restarting...")
+            await self._audio_handler.stop()
+            await self._audio_handler.start()
+            # Restore volume/mute
+            volume = self._attr_volume_level if self._attr_volume_level is not None else 100
+            self._audio_handler.set_volume(volume / 100.0)
+            self._audio_handler.set_muted(self._attr_volume_muted or False)

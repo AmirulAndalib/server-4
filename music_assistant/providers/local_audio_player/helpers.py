@@ -115,6 +115,11 @@ class AudioStreamHandler:
         self._is_playing = False
         self._stream: sd.OutputStream | None = None
 
+    @property
+    def is_stream_active(self) -> bool:
+        """Check if the audio stream is active."""
+        return self._stream is not None
+
     async def start(self) -> None:
         """Start the audio stream."""
         if self._stream is not None:
