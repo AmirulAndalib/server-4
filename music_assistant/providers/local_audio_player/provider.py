@@ -11,7 +11,7 @@ from music_assistant_models.errors import AudioError, SetupFailedError
 
 from music_assistant.models.player_provider import PlayerProvider
 
-from .constants import CONF_DEFAULT_DEVICE, DOMAIN, POWER_CYCLE_DELAY
+from .constants import DOMAIN, POWER_CYCLE_DELAY
 from .helpers import get_available_devices
 from .player import LocalSoundcardPlayer
 
@@ -113,7 +113,6 @@ class LocalSoundcardProvider(PlayerProvider):
         if player := self._players.get(player_id):
             # If device-related config changed, restart the audio handler
             device_config_keys = {
-                CONF_DEFAULT_DEVICE,
                 "device_id",
                 "sample_rate",
                 "channels",

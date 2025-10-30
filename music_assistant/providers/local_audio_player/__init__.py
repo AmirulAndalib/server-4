@@ -5,12 +5,11 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
-from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption
+from music_assistant_models.config_entries import ConfigEntry
 from music_assistant_models.enums import ConfigEntryType
 from music_assistant_models.errors import SetupFailedError
 
-from .constants import CONF_AUTO_START_PLAYERS, CONF_DEFAULT_DEVICE
-from .helpers import get_available_devices
+from .constants import CONF_AUTO_START_PLAYERS
 from .provider import LocalSoundcardProvider
 
 if TYPE_CHECKING:
@@ -47,28 +46,7 @@ async def get_config_entries(
     action: [optional] action key called from config entries UI.
     values: the (intermediate) raw values for config entries sent with the action.
     """
-    try:
-        devices = await get_available_devices()
-        device_options = [
-            ConfigValueOption(
-                title=f"{device['name']} ({device['channels']} channels)", value=device["id"]
-            )
-            for device in devices
-        ]
-    except (ImportError, SetupFailedError) as err:
-        _LOGGER.warning("Failed to detect audio devices during config generation: %s", err)
-        device_options = []
-
     return (
-        ConfigEntry(
-            key=CONF_DEFAULT_DEVICE,
-            type=ConfigEntryType.STRING,
-            label="Default Audio Device",
-            description="Default audio output device to use for new players",
-            default_value="",  # empty means no default device selected
-            required=False,
-            options=device_options,
-        ),
         ConfigEntry(
             key=CONF_AUTO_START_PLAYERS,
             type=ConfigEntryType.BOOLEAN,
