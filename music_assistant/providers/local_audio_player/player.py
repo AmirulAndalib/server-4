@@ -8,7 +8,8 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any, cast
 
-from music_assistant_models.config_entries import ConfigEntry
+import sounddevice as sd
+from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption
 from music_assistant_models.enums import (
     ConfigEntryType,
     PlaybackState,
@@ -26,7 +27,15 @@ from music_assistant.constants import (
 from music_assistant.helpers.util import TaskManager
 from music_assistant.models.player import Player
 
-from .constants import CLEANUP_TIMEOUT, CONF_DEVICE_ID, CONF_READ_AHEAD_BUFFER
+from .constants import (
+    CLEANUP_TIMEOUT,
+    CONF_ADVANCED_BUFFER_TUNING,
+    CONF_AUDIO_LATENCY,
+    CONF_BUFFER_SIZE,
+    CONF_DEVICE_ID,
+    CONF_PREFILL_CHUNKS,
+    CONF_READ_AHEAD_BUFFER,
+)
 from .helpers import AudioStreamHandler, test_device_compatibility
 
 if TYPE_CHECKING:
@@ -69,8 +78,10 @@ class LocalSoundcardPlayer(Player):
         self._attr_needs_poll = True
         self._attr_poll_interval = 1
         # Set device info
+        hostapi = cast("Any", sd.query_hostapis(device_info["host_api"]))
+        hostapi_name = hostapi["name"]
         self._attr_device_info = DeviceInfo(
-            model=device_info.get("name", "Unknown Audio Device"),
+            model=f"{device_info.get('name', 'Unknown Audio Device')} ({hostapi_name})",
             manufacturer="Local System",
         )
 
@@ -100,14 +111,66 @@ class LocalSoundcardPlayer(Player):
             ConfigEntry(
                 key=CONF_READ_AHEAD_BUFFER,
                 type=ConfigEntryType.INTEGER,
-                label="Read Buffer Size (KB)",
+                label="FFmpeg Read Buffer Size (kB)",
                 description=(
-                    "Size of read buffer for FFmpeg subprocess in kilobytes. "
-                    "Higher values provide more stability but slightly more latency."
+                    "Controls how much audio data FFmpeg reads from the source before processing. "
+                    "This buffer helps smooth out network hiccups when streaming from services "
+                    "like Spotify. Higher values = more resilient to network issues but uses more "
+                    "memory. Recommended: 256 KB for streaming services, 128 KB for local files."
                 ),
                 default_value=256,
                 required=True,
                 range=(64, 1024),
+            ),
+            ConfigEntry(
+                key=CONF_ADVANCED_BUFFER_TUNING,
+                type=ConfigEntryType.BOOLEAN,
+                label="Advanced Buffer Tuning",
+                description="Enable manual buffer configuration (for advanced users)",
+                default_value=False,
+            ),
+            ConfigEntry(
+                key=CONF_BUFFER_SIZE,
+                type=ConfigEntryType.INTEGER,
+                label="Audio Buffer Size",
+                description=(
+                    "Controls the size of audio chunks processed by the playback engine. "
+                    "This affects the balance between audio latency and stability. "
+                    "Lower values = faster response to play/pause but may cause stuttering. "
+                    "Higher values = more stable playback but slightly delayed response. "
+                    "Auto-detected based on device type (PulseAudio needs larger buffers)."
+                ),
+                default_value=4096,
+                range=(2048, 16384),
+                required=False,
+            ),
+            ConfigEntry(
+                key=CONF_PREFILL_CHUNKS,
+                type=ConfigEntryType.INTEGER,
+                label="Prefill Chunk Count",
+                description=(
+                    "How many audio chunks to buffer before playback begins. "
+                    "Higher values = smoother start and fewer underruns, but longer wait before "
+                    "audio starts. "
+                    "Lower values = faster playback start but may cause initial stuttering. "
+                    "Auto-detected: 30 chunks for PulseAudio, 10 for direct hardware access."
+                ),
+                default_value=10,
+                range=(5, 50),
+                required=False,
+            ),
+            ConfigEntry(
+                key=CONF_AUDIO_LATENCY,
+                type=ConfigEntryType.STRING,
+                label="Audio Latency Mode",
+                description="Lower latency = faster response but more prone to stuttering.",
+                default_value="auto",
+                options=[
+                    ConfigValueOption(title="Auto-detect", value="auto"),
+                    ConfigValueOption(title="Low", value="low"),
+                    ConfigValueOption(title="High", value="high"),
+                ],
+                required=False,
             ),
         ]
 
@@ -283,7 +346,7 @@ class LocalSoundcardPlayer(Player):
             await self._audio_handler.stop()
             self._audio_handler = None
 
-        # Get configuration values using base class config access
+        # Get configuration values
         device_id_value = self.config.get_value(CONF_DEVICE_ID, self._device_info_data.get("id", 0))
         device_id = int(cast("int", device_id_value))
         sample_rate = INTERNAL_PCM_FORMAT.sample_rate
@@ -296,15 +359,28 @@ class LocalSoundcardPlayer(Player):
                 f"{channels} channels at {sample_rate}Hz"
             )
 
-        # Create audio handler
+        # Detect if PulseAudio and adjust settings
+        is_pulse = self._is_pulseaudio_device(device_id)
+
+        # Get buffer settings from config or use defaults based on device type
+        buffer_size = int(
+            cast("int", self.config.get_value("buffer_size", 8192 if is_pulse else 4096))
+        )
+        prefill_chunks = int(
+            cast("int", self.config.get_value("prefill_chunks", 30 if is_pulse else 10))
+        )
+        latency_config = cast("str", self.config.get_value("audio_latency", "auto"))
+        latency = ("high" if is_pulse else "low") if latency_config == "auto" else latency_config
+
+        # Create audio handler with appropriate settings
         self._audio_handler = AudioStreamHandler(
             device_id=device_id,
             sample_rate=sample_rate,
             channels=channels,
+            buffer_size=buffer_size,
+            latency=latency,
+            prefill_chunks=prefill_chunks,
         )
-
-        # Start the audio stream
-        await self._audio_handler.start()
 
         # Set initial volume and mute state
         volume = self._attr_volume_level if self._attr_volume_level is not None else 100
@@ -317,6 +393,17 @@ class LocalSoundcardPlayer(Player):
             channels,
             sample_rate,
         )
+
+    def _is_pulseaudio_device(self, device_id: int) -> bool:
+        """Check if device uses PulseAudio."""
+        try:
+            devices = cast("Any", sd.query_devices())
+            device = devices[device_id]
+            # PulseAudio devices typically have "pulse" in the hostapi name
+            hostapi = cast("Any", sd.query_hostapis(device["hostapi"]))
+            return "pulse" in hostapi["name"].lower()
+        except Exception:
+            return False
 
     async def _cleanup_audio_handler(self) -> None:
         """Clean up the audio handler."""
@@ -523,7 +610,10 @@ class LocalSoundcardPlayer(Player):
                 except (ValueError, TypeError) as err:
                     _LOGGER.error("Error writing audio chunk: %s", err)
 
-                if not playback_started and self._audio_handler.queue_size >= 10:
+                if (
+                    not playback_started
+                    and self._audio_handler.queue_size >= self._audio_handler.prefill_chunks
+                ):
                     _LOGGER.debug(
                         "Buffer pre-filled (%d chunks), starting playback",
                         self._audio_handler.queue_size,

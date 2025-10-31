@@ -28,7 +28,8 @@ async def get_available_devices() -> list[dict[str, Any]]:
             # Cast to Any to work around sounddevice's special type
             dev = cast("Any", device)
 
-            if dev["max_output_channels"] > 0:
+            # Skip devices with no output channels or "default" in the name
+            if dev["max_output_channels"] > 0 and "default" not in dev["name"].lower():
                 output_devices.append(
                     {
                         "id": idx,
@@ -96,6 +97,8 @@ class AudioStreamHandler:
         sample_rate: int | None = None,
         channels: int | None = None,
         buffer_size: int = 4096,
+        latency: str = "low",
+        prefill_chunks: int = 10,
     ):
         """Initialize the audio stream handler."""
         self.device_id = device_id
@@ -103,7 +106,8 @@ class AudioStreamHandler:
         self.channels = channels or INTERNAL_PCM_FORMAT.channels
         self.dtype = np.dtype("float32")
         self._buffer_size = buffer_size
-
+        self._latency = latency
+        self._prefill_chunks = prefill_chunks
         # Simple circular buffer with thread safety
         self._audio_buffer: deque[bytes] = deque(maxlen=200)
         self._lock = threading.Lock()
@@ -120,6 +124,11 @@ class AudioStreamHandler:
         """Check if the audio stream is active."""
         return self._stream is not None
 
+    @property
+    def prefill_chunks(self) -> int:
+        """Get the prefill chunk threshold."""
+        return self._prefill_chunks
+
     async def start(self) -> None:
         """Start the audio stream."""
         if self._stream is not None:
@@ -135,7 +144,7 @@ class AudioStreamHandler:
                     channels=self.channels,
                     dtype=self.dtype,
                     blocksize=self._buffer_size,
-                    latency="low",
+                    latency=self._latency,
                     callback=self._audio_callback,
                 )
                 self._stream.start()
@@ -234,7 +243,11 @@ class AudioStreamHandler:
             return len(self._audio_buffer)
 
     def _audio_callback(
-        self, outdata: np.ndarray, frames: int, time: Any, status: sd.CallbackFlags
+        self,
+        outdata: np.ndarray[Any, np.dtype[np.float32]],
+        frames: int,
+        time: Any,
+        status: sd.CallbackFlags,
     ) -> None:
         """Sounddevice callback to fill output buffer - minimal GIL time."""
         if status:
