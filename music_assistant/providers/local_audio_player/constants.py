@@ -6,11 +6,16 @@ from typing import Final
 DOMAIN: Final[str] = "local_soundcard"
 
 # Configuration keys for provider-level settings
+CONF_DEFAULT_DEVICE: Final[str] = "default_device"
 CONF_AUTO_START_PLAYERS: Final[str] = "auto_start_players"
 
 # Configuration keys for player-level settings
 CONF_DEVICE_ID: Final[str] = "device_id"
-CONF_READ_AHEAD_BUFFER: Final[str] = "buffer_size"
+CONF_READ_AHEAD_BUFFER: Final[str] = "read_ahead_buffer"
+CONF_ADVANCED_BUFFER_TUNING: Final[str] = "advanced_buffer_tuning"
+CONF_BUFFER_SIZE: Final[str] = "buffer_size"
+CONF_PREFILL_CHUNKS: Final[str] = "prefill_chunks"
+CONF_AUDIO_LATENCY: Final[str] = "audio_latency"
 
 # Audio format constants
 AUDIO_FORMAT: Final[str] = "float32"  # 32-bit float for high quality
