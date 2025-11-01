@@ -16,6 +16,8 @@ CONF_ADVANCED_BUFFER_TUNING: Final[str] = "advanced_buffer_tuning"
 CONF_BUFFER_SIZE: Final[str] = "buffer_size"
 CONF_PREFILL_CHUNKS: Final[str] = "prefill_chunks"
 CONF_AUDIO_LATENCY: Final[str] = "audio_latency"
+CONF_MAX_BUFFER_CHUNKS: Final[str] = "max_buffer_chunks"
+CONF_FFMPEG_READ_BUFFER: Final[str] = "ffmpeg_read_buffer_bytes"
 
 # Audio format constants
 AUDIO_FORMAT: Final[str] = "float32"  # 32-bit float for high quality
