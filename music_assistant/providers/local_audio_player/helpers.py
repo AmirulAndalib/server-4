@@ -99,6 +99,7 @@ class AudioStreamHandler:
         buffer_size: int = 4096,
         latency: str = "low",
         prefill_chunks: int = 10,
+        max_buffer_chunks: int = 200,
     ):
         """Initialize the audio stream handler."""
         self.device_id = device_id
@@ -109,7 +110,7 @@ class AudioStreamHandler:
         self._latency = latency
         self._prefill_chunks = prefill_chunks
         # Simple circular buffer with thread safety
-        self._audio_buffer: deque[bytes] = deque(maxlen=200)
+        self._audio_buffer: deque[bytes] = deque(maxlen=max_buffer_chunks)
         self._lock = threading.Lock()
         self._bytes_buffer = b""
 

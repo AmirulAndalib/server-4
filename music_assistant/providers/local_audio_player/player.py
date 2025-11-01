@@ -33,6 +33,8 @@ from .constants import (
     CONF_AUDIO_LATENCY,
     CONF_BUFFER_SIZE,
     CONF_DEVICE_ID,
+    CONF_FFMPEG_READ_BUFFER,
+    CONF_MAX_BUFFER_CHUNKS,
     CONF_PREFILL_CHUNKS,
     CONF_READ_AHEAD_BUFFER,
 )
@@ -170,6 +172,31 @@ class LocalSoundcardPlayer(Player):
                     ConfigValueOption(title="Low", value="low"),
                     ConfigValueOption(title="High", value="high"),
                 ],
+                required=False,
+            ),
+            ConfigEntry(
+                key=CONF_MAX_BUFFER_CHUNKS,
+                type=ConfigEntryType.INTEGER,
+                label="Maximum Buffer Chunks",
+                description=(
+                    "Maximum number of audio chunks to store in memory buffer. "
+                    "Higher values prevent stuttering in slow environments (Docker/add-ons) "
+                    "but use more memory. Increase if experiencing constant underruns."
+                ),
+                default_value=200,
+                range=(100, 2000),
+                required=False,
+            ),
+            ConfigEntry(
+                key=CONF_FFMPEG_READ_BUFFER,
+                type=ConfigEntryType.INTEGER,
+                label="FFmpeg Read Buffer (bytes)",
+                description=(
+                    "Size of each read from FFmpeg subprocess. "
+                    "Higher values reduce overhead but increase latency slightly."
+                ),
+                default_value=16384,
+                range=(8192, 262144),
                 required=False,
             ),
         ]
@@ -373,6 +400,8 @@ class LocalSoundcardPlayer(Player):
         latency = ("high" if is_pulse else "low") if latency_config == "auto" else latency_config
 
         # Create audio handler with appropriate settings
+        max_buffer_chunks = int(cast("int", self.config.get_value(CONF_MAX_BUFFER_CHUNKS, 200)))
+
         self._audio_handler = AudioStreamHandler(
             device_id=device_id,
             sample_rate=sample_rate,
@@ -380,6 +409,7 @@ class LocalSoundcardPlayer(Player):
             buffer_size=buffer_size,
             latency=latency,
             prefill_chunks=prefill_chunks,
+            max_buffer_chunks=max_buffer_chunks,
         )
 
         # Set initial volume and mute state
@@ -551,9 +581,13 @@ class LocalSoundcardPlayer(Player):
                 asyncio.create_task(self._monitor_ffmpeg_stderr(self._ffmpeg_proc.stderr))
 
             # Consume FFmpeg output
+            ffmpeg_read_buffer = int(
+                cast("int", self.config.get_value(CONF_FFMPEG_READ_BUFFER, 16384))
+            )
+
             await self._consume_ffmpeg_stream(
                 self._ffmpeg_proc.stdout,
-                buffer_size_bytes=16384,
+                buffer_size_bytes=ffmpeg_read_buffer,
             )
 
         except asyncio.CancelledError:
