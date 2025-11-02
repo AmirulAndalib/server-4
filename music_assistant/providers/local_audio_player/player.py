@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import logging
-import threading
 import time
 from typing import TYPE_CHECKING, Any, cast
 
@@ -551,8 +550,6 @@ class LocalSoundcardPlayer(Player):
         if not self._audio_handler:
             raise PlayerCommandFailed("Audio handler not initialized")
 
-        reader_thread = None
-
         try:
             # Get FFmpeg read buffer size from config
             ffmpeg_read_buffer = int(
@@ -588,36 +585,11 @@ class LocalSoundcardPlayer(Player):
             if self._ffmpeg_proc.stderr:
                 asyncio.create_task(self._monitor_ffmpeg_stderr(self._ffmpeg_proc.stderr))
 
-            # Start dedicated reader thread
-            reader_thread = threading.Thread(
-                target=self._ffmpeg_reader_thread,
-                args=(self._ffmpeg_proc, ffmpeg_read_buffer),
-                daemon=True,
+            # Consume FFmpeg output
+            await self._consume_ffmpeg_stream(
+                self._ffmpeg_proc.stdout,
+                buffer_size_bytes=ffmpeg_read_buffer,
             )
-            reader_thread.start()
-
-            # Wait for buffer to prefill
-            prefill_target = self._audio_handler.prefill_chunks
-            _LOGGER.debug("Waiting for buffer to reach %d chunks", prefill_target)
-
-            while self._audio_handler.queue_size < prefill_target:
-                await asyncio.sleep(0.1)
-                # Check if FFmpeg died
-                if self._ffmpeg_proc.returncode is not None:
-                    raise PlayerCommandFailed("FFmpeg process terminated unexpectedly")
-
-            # Start playback
-            _LOGGER.info(
-                "Buffer pre-filled (%d chunks), starting playback",
-                self._audio_handler.queue_size,
-            )
-            self._playback_start_time = time.time()
-            self._attr_elapsed_time = 0
-            self._attr_elapsed_time_last_updated = time.time()
-            self._audio_handler.play()
-
-            # Wait for FFmpeg to finish
-            await self._ffmpeg_proc.wait()
 
         except asyncio.CancelledError:
             _LOGGER.debug("Stream task cancelled")
@@ -630,16 +602,12 @@ class LocalSoundcardPlayer(Player):
             ffmpeg_proc = self._ffmpeg_proc
             self._ffmpeg_proc = None
 
-            if ffmpeg_proc and ffmpeg_proc.returncode is not None:
+            if ffmpeg_proc and ffmpeg_proc.returncode is None:
                 try:
                     ffmpeg_proc.kill()
                     await asyncio.wait_for(ffmpeg_proc.wait(), timeout=2.0)
                 except (TimeoutError, ProcessLookupError):
                     pass
-
-            # Wait for reader thread to finish
-            if reader_thread and reader_thread.is_alive():
-                reader_thread.join(timeout=2.0)
 
     async def _monitor_ffmpeg_stderr(self, stderr: asyncio.StreamReader) -> None:
         """Monitor FFmpeg stderr for errors."""
@@ -728,20 +696,3 @@ class LocalSoundcardPlayer(Player):
             volume = self._attr_volume_level if self._attr_volume_level is not None else 100
             self._audio_handler.set_volume(volume / 100.0)
             self._audio_handler.set_muted(self._attr_volume_muted or False)
-
-    def _ffmpeg_reader_thread(self, process: Any, buffer_size_bytes: int) -> None:
-        """Dedicated thread for reading FFmpeg output."""
-        try:
-            import os
-
-            # Get raw file descriptor from the process
-            fd = process.stdout.fileno()
-
-            while True:
-                chunk = os.read(fd, buffer_size_bytes)
-                if not chunk:
-                    break
-                if self._audio_handler:
-                    self._audio_handler.write_audio(chunk)
-        except Exception as err:
-            _LOGGER.error("FFmpeg reader thread error: %s", err)
