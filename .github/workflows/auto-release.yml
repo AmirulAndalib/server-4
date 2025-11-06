@@ -245,7 +245,6 @@ jobs:
       contents: write
       pull-requests: read
       packages: write
-      id-token: write # Required for PyPI publishing
     uses: ./.github/workflows/release.yml
     with:
       version: ${{ needs.check-and-release.outputs.version }}
@@ -253,3 +252,22 @@ jobs:
     secrets:
       PYPI_TOKEN: ${{ secrets.PYPI_TOKEN }}
       PRIVILEGED_GITHUB_TOKEN: ${{ secrets.PRIVILEGED_GITHUB_TOKEN }}
+
+  pypi-publish:
+    name: Publish release to PyPI (stable releases only)
+    runs-on: ubuntu-latest
+    needs:
+      - check-and-release
+      - trigger-release
+    if: needs.check-and-release.outputs.should_release == 'true' && needs.check-and-release.outputs.channel == 'stable'
+    permissions:
+      id-token: write
+    steps:
+      - name: Download distributions
+        uses: actions/download-artifact@v6
+        with:
+          name: release-dists
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
