@@ -88,6 +88,7 @@ class SnapCastPlayer(Player):
 
     async def volume_set(self, volume_level: int) -> None:
         """Send VOLUME_SET command to given player."""
+        await asyncio.sleep(self.provider._volume_change_delay / 1000)
         await self.snap_client.set_volume(volume_level)
 
     async def stop(self) -> None:
@@ -394,6 +395,7 @@ class SnapCastPlayer(Player):
         return stream_path.replace("0.0.0.0", self.provider._snapcast_server_host)
 
     async def _delete_stream(self, stream_name: str) -> None:
+        await asyncio.sleep(self.provider._stream_remove_delay / 1000)
         if stream := self._get_snapstream(stream_name):
             with suppress(TypeError, KeyError, AttributeError):
                 await self.provider._snapserver.stream_remove_stream(stream.identifier)

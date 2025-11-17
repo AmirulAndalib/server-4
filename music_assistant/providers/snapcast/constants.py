@@ -17,7 +17,8 @@ CONF_SERVER_INITIAL_VOLUME = "snapcast_server_built_in_initial_volume"
 CONF_SERVER_TRANSPORT_CODEC = "snapcast_server_built_in_codec"
 CONF_SERVER_SEND_AUDIO_TO_MUTED = "snapcast_server_built_in_send_muted"
 CONF_STREAM_IDLE_THRESHOLD = "snapcast_stream_idle_threshold"
-
+CONF_VOLUME_CHANGE_DELAY = "snapcast_volume_change_delay"
+CONF_STREAM_REMOVE_DELAY = "snapcast_stream_remove_delay"
 
 CONF_CATEGORY_GENERIC = "generic"
 CONF_CATEGORY_ADVANCED = "advanced"
@@ -35,6 +36,8 @@ CONF_ENTRY_SAMPLE_RATES_SNAPCAST = create_sample_rates_config_entry(
 DEFAULT_SNAPSERVER_IP = "127.0.0.1"
 DEFAULT_SNAPSERVER_PORT = 1705
 DEFAULT_SNAPSTREAM_IDLE_THRESHOLD = 60000
+DEFAULT_VOLUME_CHANGE_DELAY = 0
+DEFAULT_STREAM_REMOVE_DELAY = 0
 
 MASS_STREAM_PREFIX = "Music Assistant - "
 MASS_ANNOUNCEMENT_POSTFIX = " (announcement)"

@@ -26,10 +26,14 @@ from music_assistant.providers.snapcast.constants import (
     CONF_SERVER_SEND_AUDIO_TO_MUTED,
     CONF_SERVER_TRANSPORT_CODEC,
     CONF_STREAM_IDLE_THRESHOLD,
+    CONF_STREAM_REMOVE_DELAY,
     CONF_USE_EXTERNAL_SERVER,
+    CONF_VOLUME_CHANGE_DELAY,
     DEFAULT_SNAPSERVER_IP,
     DEFAULT_SNAPSERVER_PORT,
     DEFAULT_SNAPSTREAM_IDLE_THRESHOLD,
+    DEFAULT_STREAM_REMOVE_DELAY,
+    DEFAULT_VOLUME_CHANGE_DELAY,
 )
 from music_assistant.providers.snapcast.provider import SnapCastProvider
 
@@ -186,6 +190,22 @@ async def get_config_entries(
             type=ConfigEntryType.INTEGER,
             default_value=DEFAULT_SNAPSTREAM_IDLE_THRESHOLD,
             label="Snapcast idle threshold stream parameter",
+            required=True,
+            category=CONF_CATEGORY_ADVANCED,
+        ),
+        ConfigEntry(
+            key=CONF_VOLUME_CHANGE_DELAY,
+            type=ConfigEntryType.INTEGER,
+            default_value=DEFAULT_VOLUME_CHANGE_DELAY,
+            label="Snapcast volume change delay in ms",
+            required=True,
+            category=CONF_CATEGORY_ADVANCED,
+        ),
+        ConfigEntry(
+            key=CONF_STREAM_REMOVE_DELAY,
+            type=ConfigEntryType.INTEGER,
+            default_value=DEFAULT_STREAM_REMOVE_DELAY,
+            label="Snapcast stream remove delay in ms",
             required=True,
             category=CONF_CATEGORY_ADVANCED,
         ),

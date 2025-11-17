@@ -28,7 +28,9 @@ from music_assistant.providers.snapcast.constants import (
     CONF_SERVER_SEND_AUDIO_TO_MUTED,
     CONF_SERVER_TRANSPORT_CODEC,
     CONF_STREAM_IDLE_THRESHOLD,
+    CONF_STREAM_REMOVE_DELAY,
     CONF_USE_EXTERNAL_SERVER,
+    CONF_VOLUME_CHANGE_DELAY,
     DEFAULT_SNAPSERVER_PORT,
     SNAPWEB_DIR,
 )
@@ -72,6 +74,8 @@ class SnapCastProvider(PlayerProvider):
             )
         self._snapcast_stream_idle_threshold = self.config.get_value(CONF_STREAM_IDLE_THRESHOLD)
         self._ids_map = bidict({})
+        self._volume_change_delay = self.config.get_value(CONF_VOLUME_CHANGE_DELAY)
+        self._stream_remove_delay = self.config.get_value(CONF_STREAM_REMOVE_DELAY)
 
         if self._use_builtin_server:
             await self._start_builtin_server()
