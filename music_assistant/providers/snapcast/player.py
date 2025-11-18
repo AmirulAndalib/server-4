@@ -271,13 +271,13 @@ class SnapCastPlayer(Player):
         while stream.status != "idle":
             await asyncio.sleep(0.25)
 
-        # delete the announcement stream
-        await self._delete_stream(stream_name)
-
         # restore volume, if we changed it above and it's still the same we set
         # (the user did not change it himself while the announcement was playing)
         if self.volume_level == volume_level and orig_volume_level is not None:
-            await self.volume_set(orig_volume_level)
+            await self.volume_set(orig_volume_level) 
+    
+        # delete the announcement stream
+        await self._delete_stream(stream_name)
 
         # and restore the group to either the default or the music stream
         if self.playback_state == PlaybackState.IDLE:
