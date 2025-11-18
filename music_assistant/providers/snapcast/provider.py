@@ -74,8 +74,8 @@ class SnapCastProvider(PlayerProvider):
             )
         self._snapcast_stream_idle_threshold = self.config.get_value(CONF_STREAM_IDLE_THRESHOLD)
         self._ids_map = bidict({})
-        self._volume_change_delay = self.config.get_value(CONF_VOLUME_CHANGE_DELAY)
-        self._stream_remove_delay = self.config.get_value(CONF_STREAM_REMOVE_DELAY)
+        self._volume_change_delay = int(str(self.config.get_value(CONF_VOLUME_CHANGE_DELAY)))
+        self._stream_remove_delay = int(str(self.config.get_value(CONF_STREAM_REMOVE_DELAY)))
 
         if self._use_builtin_server:
             await self._start_builtin_server()
