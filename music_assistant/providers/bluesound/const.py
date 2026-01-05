@@ -113,4 +113,4 @@ PLAYER_SOURCE_MAP = {
 POLL_STATE_STATIC = "static"
 POLL_STATE_DYNAMIC = "dynamic"
 
-MUSP_MDNS_TYPE = "_musp._tcp.local."
+MUSP_MDNS_TYPE = "_musp._tcp."

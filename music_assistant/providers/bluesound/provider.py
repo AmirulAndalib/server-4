@@ -64,9 +64,9 @@ class BluesoundPlayerProvider(PlayerProvider):
             mac_address = info.decoded_properties.get("mac")
             player_id = mac_address
 
-        if not mac_address:
+        if not player_id:
             self.logger.debug(
-                "Ignoring mdns discovery for Bluesound player without MAC address: %s",
+                "Ignoring mdns discovery for Bluesound player: %s, can't generate player_ID",
                 name,
             )
             return
