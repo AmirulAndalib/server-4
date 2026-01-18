@@ -484,19 +484,13 @@ class AlbumsController(MediaControllerBase[Album]):
                     "album_id": db_id,
                 },
             )
-        for position, artist in enumerate(artists):
-            await self._set_album_artist(db_id, artist=artist, position=position, overwrite=overwrite)
+        for artist in artists:
+            await self._set_album_artist(db_id, artist=artist, overwrite=overwrite)
 
     async def _set_album_artist(
-        self, db_id: int, artist: Artist | ItemMapping, position: int = 0, overwrite: bool = False
+        self, db_id: int, artist: Artist | ItemMapping, overwrite: bool = False
     ) -> ItemMapping:
-        """Store Album Artist info.
-
-        :param db_id: The album's database ID.
-        :param artist: The artist to associate with the album.
-        :param position: The position/order of this artist (0-indexed).
-        :param overwrite: Whether to overwrite existing artist info.
-        """
+        """Store Album Artist info."""
         db_artist: Artist | ItemMapping | None = None
         if artist.provider == "library":
             db_artist = artist
@@ -521,7 +515,6 @@ class AlbumsController(MediaControllerBase[Album]):
             {
                 "album_id": db_id,
                 "artist_id": int(db_artist.item_id),
-                "position": position,
             },
         )
         return ItemMapping.from_item(db_artist)

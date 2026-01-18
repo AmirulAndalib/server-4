@@ -77,7 +77,7 @@ class TracksController(MediaControllerBase[Track]):
                     'name', artists.name,
                     'sort_name', artists.sort_name,
                     'media_type', 'artist'
-                )) FROM artists JOIN track_artists on track_artists.track_id = tracks.item_id  WHERE artists.item_id = track_artists.artist_id ORDER BY track_artists.position) AS artists,
+                )) FROM artists JOIN track_artists on track_artists.track_id = tracks.item_id  WHERE artists.item_id = track_artists.artist_id) AS artists,
             (SELECT
                 json_object(
                 'item_id', albums.item_id,
@@ -653,22 +653,14 @@ class TracksController(MediaControllerBase[Track]):
                 },
             )
         artist_mappings: UniqueList[ItemMapping] = UniqueList()
-        for position, artist in enumerate(artists):
-            mapping = await self._set_track_artist(
-                db_id, artist=artist, position=position, overwrite=overwrite
-            )
+        for artist in artists:
+            mapping = await self._set_track_artist(db_id, artist=artist, overwrite=overwrite)
             artist_mappings.append(mapping)
 
     async def _set_track_artist(
-        self, db_id: int, artist: Artist | ItemMapping, position: int = 0, overwrite: bool = False
+        self, db_id: int, artist: Artist | ItemMapping, overwrite: bool = False
     ) -> ItemMapping:
-        """Store Track Artist info.
-
-        :param db_id: The track's database ID.
-        :param artist: The artist to associate with the track.
-        :param position: The position/order of this artist (0-indexed).
-        :param overwrite: Whether to overwrite existing artist info.
-        """
+        """Store Track Artist info."""
         db_artist: Artist | ItemMapping | None = None
         if artist.provider == "library":
             db_artist = artist
@@ -693,7 +685,6 @@ class TracksController(MediaControllerBase[Track]):
             {
                 "track_id": db_id,
                 "artist_id": int(db_artist.item_id),
-                "position": position,
             },
         )
         return ItemMapping.from_item(db_artist)

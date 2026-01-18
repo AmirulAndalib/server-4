@@ -2398,7 +2398,6 @@ class MusicController(CoreController):
             f"""CREATE TABLE IF NOT EXISTS {DB_TABLE_TRACK_ARTISTS}(
             [track_id] INTEGER NOT NULL,
             [artist_id] INTEGER NOT NULL,
-            [position] INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY([track_id]) REFERENCES [tracks]([item_id]),
             FOREIGN KEY([artist_id]) REFERENCES [artists]([item_id]),
             UNIQUE(track_id, artist_id)
@@ -2408,7 +2407,6 @@ class MusicController(CoreController):
             f"""CREATE TABLE IF NOT EXISTS {DB_TABLE_ALBUM_ARTISTS}(
             [album_id] INTEGER NOT NULL,
             [artist_id] INTEGER NOT NULL,
-            [position] INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY([album_id]) REFERENCES [albums]([item_id]),
             FOREIGN KEY([artist_id]) REFERENCES [artists]([item_id]),
             UNIQUE(album_id, artist_id)
