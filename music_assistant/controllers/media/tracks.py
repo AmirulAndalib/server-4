@@ -77,7 +77,7 @@ class TracksController(MediaControllerBase[Track]):
                     'name', artists.name,
                     'sort_name', artists.sort_name,
                     'media_type', 'artist'
-                )) FROM artists JOIN track_artists on track_artists.track_id = tracks.item_id  WHERE artists.item_id = track_artists.artist_id) AS artists,
+                )) FROM artists JOIN track_artists on track_artists.track_id = tracks.item_id  WHERE artists.item_id = track_artists.artist_id ORDER BY track_artists.rowid) AS artists,
             (SELECT
                 json_object(
                 'item_id', albums.item_id,
