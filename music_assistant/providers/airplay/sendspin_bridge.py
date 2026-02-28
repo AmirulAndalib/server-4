@@ -126,7 +126,7 @@ class SendspinAirPlayBridge:
 
         hello = ClientHelloPayload(
             client_id=self._bridge_client_id,
-            name=f"{self.airplay_player.display_name} (AirPlay)",
+            name=self.airplay_player.display_name,
             version=1,
             supported_roles=[BRIDGE_ROLE_ID],
             device_info=SendspinDeviceInfo(
