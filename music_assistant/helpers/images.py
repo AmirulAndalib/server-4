@@ -207,7 +207,7 @@ async def get_image_thumb(
         return thumb_data
 
     # 3. Generate thumbnail (de-duplicated across concurrent requests)
-    task: asyncio.Task[bytes] = mass.create_task(
+    task = mass.create_task(
         _generate_and_cache_thumb,
         mass,
         path_or_url,
@@ -218,9 +218,11 @@ async def get_image_thumb(
         task_id=f"thumb.{cache_filename}",
         abort_existing=False,
     )
-    thumb_data = await asyncio.shield(task)
-    _put_in_memory_cache(cache_filename, thumb_data)
-    return thumb_data
+    result = await asyncio.shield(task)
+    if result is None:
+        raise FileNotFoundError(f"Image not found: {path_or_url}")
+    _put_in_memory_cache(cache_filename, result)
+    return result
 
 
 async def _generate_and_cache_thumb(
@@ -230,8 +232,11 @@ async def _generate_and_cache_thumb(
     provider: str,
     image_format: str,
     cache_filepath: str,
-) -> bytes:
+) -> bytes | None:
     """Generate a thumbnail, persist it on disk, and return the bytes.
+
+    Returns None if the image cannot be fetched or processed, allowing the caller
+    to handle fallback logic without triggering task exception logging.
 
     :param mass: The MusicAssistant instance.
     :param path_or_url: Path or URL to the source image.
@@ -240,20 +245,24 @@ async def _generate_and_cache_thumb(
     :param image_format: Normalized output format (PNG or JPEG).
     :param cache_filepath: Absolute path where the thumbnail will be stored.
     """
-    img_data = await get_image_data(mass, path_or_url, provider)
+    try:
+        img_data = await get_image_data(mass, path_or_url, provider)
+    except FileNotFoundError:
+        return None
     if not img_data or not isinstance(img_data, bytes):
-        raise FileNotFoundError(f"Image not found: {path_or_url}")
+        return None
 
+    thumb_data: bytes | None
     if not size and image_format.encode() in img_data:
         thumb_data = img_data
     else:
 
-        def _create_image() -> bytes:
+        def _create_image() -> bytes | None:
             data = BytesIO()
             try:
                 img = Image.open(BytesIO(img_data))
             except UnidentifiedImageError:
-                raise FileNotFoundError(f"Invalid image: {path_or_url}")
+                return None
             if size:
                 img.thumbnail((size, size), Image.Resampling.LANCZOS)
             mode = "RGBA" if image_format == "PNG" else "RGB"
@@ -264,6 +273,9 @@ async def _generate_and_cache_thumb(
             return data.getvalue()
 
         thumb_data = await asyncio.to_thread(_create_image)
+
+    if thumb_data is None:
+        return None
 
     # Persist to disk cache (best-effort, don't fail on I/O errors)
     try:

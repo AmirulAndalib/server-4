@@ -133,6 +133,12 @@ LOCALES = {
 DEFAULT_LANGUAGE = "en_US"
 REFRESH_INTERVAL = 60 * 60 * 24 * 90  # 90 days
 CONF_ENABLE_ONLINE_METADATA = "enable_online_metadata"
+CONF_FALLBACK_ARTIST_IMAGE = "fallback_artist_image"
+CONF_FALLBACK_RADIO_IMAGE = "fallback_radio_image"
+CONF_FALLBACK_ALBUM_IMAGE = "fallback_album_image"
+CONF_FALLBACK_PLAYLIST_IMAGE = "fallback_playlist_image"
+CONF_FALLBACK_PODCAST_IMAGE = "fallback_podcast_image"
+CONF_FALLBACK_AUDIOBOOK_IMAGE = "fallback_audiobook_image"
 MISSING_ARTIST_ARTWORK_SCAN_TASK_ID = "metadata_missing_artist_artwork_scan"
 PLAYLIST_METADATA_SCAN_TASK_ID = "metadata_playlist_metadata_scan"
 THUMB_CACHE_CLEANUP_TASK_ID = "metadata_thumb_cache_cleanup"
@@ -205,6 +211,66 @@ class MetaDataController(CoreController):
                 description="Maximum total size in megabytes for the on-disk thumbnail cache.\n\n"
                 "Oldest thumbnails are automatically removed when this limit is exceeded.",
             ),
+            ConfigEntry(
+                key=CONF_FALLBACK_ARTIST_IMAGE,
+                type=ConfigEntryType.STRING,
+                label="Fallback image URL for artists",
+                required=False,
+                default_value="",
+                description="URL to an image that will be used as a fallback for artists "
+                "that do not have artwork. Leave empty to use the default two-letter image.",
+                advanced=True,
+            ),
+            ConfigEntry(
+                key=CONF_FALLBACK_ALBUM_IMAGE,
+                type=ConfigEntryType.STRING,
+                label="Fallback image URL for albums",
+                required=False,
+                default_value="",
+                description="URL to an image that will be used as a fallback for albums "
+                "that do not have artwork. Leave empty to disable.",
+                advanced=True,
+            ),
+            ConfigEntry(
+                key=CONF_FALLBACK_RADIO_IMAGE,
+                type=ConfigEntryType.STRING,
+                label="Fallback image URL for radio stations",
+                required=False,
+                default_value="",
+                description="URL to an image that will be used as a fallback for radio stations "
+                "that do not have artwork. Leave empty to disable.",
+                advanced=True,
+            ),
+            ConfigEntry(
+                key=CONF_FALLBACK_PLAYLIST_IMAGE,
+                type=ConfigEntryType.STRING,
+                label="Fallback image URL for playlists",
+                required=False,
+                default_value="",
+                description="URL to an image that will be used as a fallback for playlists "
+                "that do not have artwork. Leave empty to disable.",
+                advanced=True,
+            ),
+            ConfigEntry(
+                key=CONF_FALLBACK_PODCAST_IMAGE,
+                type=ConfigEntryType.STRING,
+                label="Fallback image URL for podcasts",
+                required=False,
+                default_value="",
+                description="URL to an image that will be used as a fallback for podcasts "
+                "that do not have artwork. Leave empty to disable.",
+                advanced=True,
+            ),
+            ConfigEntry(
+                key=CONF_FALLBACK_AUDIOBOOK_IMAGE,
+                type=ConfigEntryType.STRING,
+                label="Fallback image URL for audiobooks",
+                required=False,
+                default_value="",
+                description="URL to an image that will be used as a fallback for audiobooks "
+                "that do not have artwork. Leave empty to disable.",
+                advanced=True,
+            ),
         )
 
     async def setup(self, config: CoreConfig) -> None:
@@ -254,6 +320,66 @@ class MetaDataController(CoreController):
             self.domain, CONF_LANGUAGE, DEFAULT_LANGUAGE
         )
         return str(value)
+
+    @property
+    def fallback_artist_image(self) -> str | None:
+        """Return fallback image URL for artists, or None if not configured."""
+        value = self.mass.config.get_raw_core_config_value(
+            self.domain, CONF_FALLBACK_ARTIST_IMAGE, ""
+        )
+        return str(value) if value else None
+
+    @property
+    def fallback_radio_image(self) -> str | None:
+        """Return fallback image URL for radio stations, or None if not configured."""
+        value = self.mass.config.get_raw_core_config_value(
+            self.domain, CONF_FALLBACK_RADIO_IMAGE, ""
+        )
+        return str(value) if value else None
+
+    @property
+    def fallback_album_image(self) -> str | None:
+        """Return fallback image URL for albums, or None if not configured."""
+        value = self.mass.config.get_raw_core_config_value(
+            self.domain, CONF_FALLBACK_ALBUM_IMAGE, ""
+        )
+        return str(value) if value else None
+
+    @property
+    def fallback_playlist_image(self) -> str | None:
+        """Return fallback image URL for playlists, or None if not configured."""
+        value = self.mass.config.get_raw_core_config_value(
+            self.domain, CONF_FALLBACK_PLAYLIST_IMAGE, ""
+        )
+        return str(value) if value else None
+
+    @property
+    def fallback_podcast_image(self) -> str | None:
+        """Return fallback image URL for podcasts, or None if not configured."""
+        value = self.mass.config.get_raw_core_config_value(
+            self.domain, CONF_FALLBACK_PODCAST_IMAGE, ""
+        )
+        return str(value) if value else None
+
+    @property
+    def fallback_audiobook_image(self) -> str | None:
+        """Return fallback image URL for audiobooks, or None if not configured."""
+        value = self.mass.config.get_raw_core_config_value(
+            self.domain, CONF_FALLBACK_AUDIOBOOK_IMAGE, ""
+        )
+        return str(value) if value else None
+
+    def get_fallback_image_for_media_type(self, media_type: MediaType) -> str | None:
+        """Return the configured fallback image URL for the given media type."""
+        fallback_map: dict[MediaType, str | None] = {
+            MediaType.ARTIST: self.fallback_artist_image,
+            MediaType.ALBUM: self.fallback_album_image,
+            MediaType.RADIO: self.fallback_radio_image,
+            MediaType.PLAYLIST: self.fallback_playlist_image,
+            MediaType.PODCAST: self.fallback_podcast_image,
+            MediaType.AUDIOBOOK: self.fallback_audiobook_image,
+        }
+        return fallback_map.get(media_type)
 
     @api_command("metadata/set_default_preferred_language")
     def set_default_preferred_language(self, lang: str) -> None:
@@ -494,14 +620,61 @@ class MetaDataController(CoreController):
         return thumbnail_bytes
 
     async def handle_imageproxy(self, request: web.Request) -> web.Response:
-        """Handle request for image proxy."""
-        path = request.query["path"]
+        """Handle request for image proxy.
+
+        Query parameters:
+        - path: The image path or URL (optional if media_type provided for fallback)
+        - provider: The provider ID (default: "builtin")
+        - size: The desired image size (default: 0, meaning original)
+        - fmt: The image format (default: auto-detected from path)
+        - media_type: Optional media type for fallback image selection
+        """
+        path = request.query.get("path")
+        size = int(request.query.get("size", "0"))
+        media_type_str = request.query.get("media_type")
+        media_type: MediaType | None = None
+        image_format: str | None = None
+        image_data: bytes | str | None = None
+        if media_type_str:
+            with suppress(ValueError):
+                media_type = MediaType(media_type_str)
+
+        # If no path provided, serve fallback based on media_type
+        if not path:
+            if media_type:
+                fallback_url = self.get_fallback_image_for_media_type(media_type)
+                if fallback_url:
+                    image_format = _detect_image_format(fallback_url)
+                    try:
+                        image_data = await self.get_thumbnail(
+                            fallback_url,
+                            size=size,
+                            provider="builtin",
+                            image_format=image_format,
+                        )
+                        content_type = (
+                            "image/svg+xml" if image_format == "svg" else f"image/{image_format}"
+                        )
+                        return web.Response(
+                            body=image_data,
+                            headers={
+                                "Cache-Control": "max-age=31536000",
+                                "Access-Control-Allow-Origin": "*",
+                            },
+                            content_type=content_type,
+                        )
+                    except Exception:  # noqa: S110
+                        pass  # Fallback failed, return 404
+                else:
+                    # No fallback URL configured for this media type - return 204 No Content
+                    return web.Response(status=204)
+            return web.Response(status=404)
+
         provider = request.query.get("provider", "builtin")
         if provider in ("url", "file", "http"):
             # temporary for backwards compatibility
             provider = "builtin"
-        size = int(request.query.get("size", "0"))
-        image_format = request.query.get("fmt", None)
+        image_format = request.query.get("fmt")
         if image_format is None:
             image_format = _detect_image_format(path)
         if not self.mass.get_provider(provider) and not path.startswith("http"):
@@ -513,26 +686,41 @@ class MetaDataController(CoreController):
             image_data = await self.get_thumbnail(
                 path, size=size, provider=provider, image_format=image_format
             )
-            # we set the cache header to 1 year (forever)
-            # assuming that images do not/rarely change
-            content_type = "image/svg+xml" if image_format == "svg" else f"image/{image_format}"
-            return web.Response(
-                body=image_data,
-                headers={"Cache-Control": "max-age=31536000", "Access-Control-Allow-Origin": "*"},
-                content_type=content_type,
-            )
         except Exception as err:
-            # broadly catch all exceptions here to ensure we dont crash the request handler
-            if isinstance(err, FileNotFoundError):
-                self.logger.log(VERBOSE_LOG_LEVEL, "Image not found: %s", path)
-            else:
-                self.logger.warning(
-                    "Error while fetching image %s: %s",
-                    path,
-                    str(err),
-                    exc_info=err if self.logger.isEnabledFor(10) else None,
-                )
-        return web.Response(status=404)
+            # Image fetch failed - try fallback if media_type provided and configured
+            if media_type:
+                fallback_url = self.get_fallback_image_for_media_type(media_type)
+                if fallback_url:
+                    try:
+                        fallback_format = _detect_image_format(fallback_url)
+                        image_data = await self.get_thumbnail(
+                            fallback_url,
+                            size=size,
+                            provider="builtin",
+                            image_format=fallback_format,
+                        )
+                        image_format = fallback_format
+                    except Exception:  # noqa: S110
+                        pass  # Fallback also failed, will return 404 below
+            if image_data is None:
+                if isinstance(err, FileNotFoundError):
+                    self.logger.log(VERBOSE_LOG_LEVEL, "Image not found: %s", path)
+                else:
+                    self.logger.warning(
+                        "Error while fetching image %s: %s",
+                        path,
+                        str(err),
+                        exc_info=err if self.logger.isEnabledFor(10) else None,
+                    )
+                return web.Response(status=404)
+        # we set the cache header to 1 year (forever)
+        # assuming that images do not/rarely change
+        content_type = "image/svg+xml" if image_format == "svg" else f"image/{image_format}"
+        return web.Response(
+            body=image_data,
+            headers={"Cache-Control": "max-age=31536000", "Access-Control-Allow-Origin": "*"},
+            content_type=content_type,
+        )
 
     async def create_collage_image(
         self,
