@@ -17,6 +17,12 @@ from music_assistant_models.media_items import AudioFormat
 from music_assistant.models.audio_analysis import AudioAnalysisData
 from music_assistant.models.audio_analysis_provider import AudioAnalysisProvider
 
+from .analysis_helpers import (
+    compute_rms_per_second,
+    compute_stft_features,
+    detect_key,
+    detect_phrase_boundaries,
+)
 from .feature_extractor import AdvancedBeatFeatureExtractor
 
 if TYPE_CHECKING:
@@ -84,6 +90,10 @@ class SmartFadesData:
     pcm_samples: int = 0
     total_pcm_samples: int = 0
     feature_blocks: list[np.ndarray] = field(default_factory=list)
+    # Extended analysis accumulators
+    energy_chunks: list[np.ndarray] = field(default_factory=list)
+    centroid_chunks: list[np.ndarray] = field(default_factory=list)
+    chroma_chunks: list[np.ndarray] = field(default_factory=list)
 
 
 class SmartFadesProvider(AudioAnalysisProvider):
@@ -210,11 +220,38 @@ class SmartFadesProvider(AudioAnalysisProvider):
 
         bpm = _calculate_overall_bpm(beats)
 
+        # Build extended analysis fields
+        energy_curve = None
+        if data.energy_chunks:
+            energy_curve = np.concatenate(data.energy_chunks)
+            peak = energy_curve.max()
+            if peak > 0:
+                energy_curve = energy_curve / peak
+
+        spectral_centroid_curve = None
+        if data.centroid_chunks:
+            spectral_centroid_curve = np.concatenate(data.centroid_chunks)
+
+        musical_key = None
+        if data.chroma_chunks:
+            chroma_all = np.concatenate(data.chroma_chunks, axis=0)
+            musical_key = detect_key(chroma_all, duration)
+
+        phrase_boundaries = None
+        if energy_curve is not None and spectral_centroid_curve is not None and len(downbeats) >= 4:
+            phrase_boundaries = detect_phrase_boundaries(
+                downbeats, energy_curve, spectral_centroid_curve, bpm,
+            ) or None
+
         analysis = AudioAnalysisData(
             bpm=bpm,
             beats=beats,
             downbeats=downbeats,
             duration=duration,
+            energy_curve=energy_curve,
+            spectral_centroid_curve=spectral_centroid_curve,
+            musical_key=musical_key,
+            phrase_boundaries=phrase_boundaries,
         )
 
         await self.mass.music.set_audio_analysis(
@@ -226,11 +263,14 @@ class SmartFadesProvider(AudioAnalysisProvider):
         )
 
         self.logger.info(
-            "Stored beat analysis for %s: BPM=%.1f, %d beats, %d downbeats",
+            "Stored beat analysis for %s: BPM=%.1f, %d beats, %d downbeats, "
+            "key=%s, %d phrase boundaries",
             data.item_id,
             bpm,
             len(beats),
             len(downbeats),
+            musical_key["root"] + " " + musical_key["mode"] if musical_key else "unknown",
+            len(phrase_boundaries) if phrase_boundaries else 0,
         )
 
     async def cancel(self, session_id: str) -> None:
@@ -296,6 +336,21 @@ class SmartFadesProvider(AudioAnalysisProvider):
         if feats.size:
             data.feature_blocks.append(feats)
         self.logger.debug("Processed 10s of PCM chunks in %.1fms", elapsed_ms)
+
+        # Extended analysis: RMS energy from raw PCM (no STFT, streaming-safe)
+        rms = compute_rms_per_second(pcm_22k, ANALYSIS_SAMPLE_RATE)
+        if len(rms) > 0:
+            data.energy_chunks.append(rms)
+
+        # Extended analysis: spectral centroid + chroma from shared STFT
+        if len(pcm_22k) >= 2048:
+            centroid, chroma = await asyncio.to_thread(
+                compute_stft_features, pcm_22k, ANALYSIS_SAMPLE_RATE,
+            )
+            if len(centroid) > 0:
+                data.centroid_chunks.append(centroid)
+            if len(chroma) > 0:
+                data.chroma_chunks.append(chroma)
 
     def _run_inference_sync(self, feats: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Run model inference synchronously. Called from thread pool."""
