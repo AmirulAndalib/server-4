@@ -23,8 +23,8 @@
 | `music_assistant/models/audio_analysis.py` | Modify | Remove `phrase_boundaries` field |
 | `tests/providers/smart_fades/test_analysis_helpers.py` | Modify | Remove phrase boundary tests |
 | `music_assistant/controllers/streams/smart_fades/fades.py` | Modify | Energy-contour alignment in `SmartCrossFade`, energy-aware curves |
-| `music_assistant/controllers/streams/smart_fades/filters.py` | Modify | Add `GradualTimeStretchFilter`, `GainCompensationFilter` |
-| `music_assistant/controllers/streams/smart_fades/crossfade_helpers.py` | Create | Energy-contour functions: find_fadeout_start, find_fadein_entry, calculate_energy_duration, S-curve tempo |
+| `music_assistant/controllers/streams/smart_fades/filters.py` | Modify | Add `GradualTimeStretchFilter` |
+| `music_assistant/controllers/streams/smart_fades/crossfade_helpers.py` | Create | Energy-contour functions: find_fadeout_start, find_fadein_entry, calculate_energy_duration, S-curve tempo, curve selection |
 | `tests/controllers/streams/smart_fades/test_crossfade_helpers.py` | Create | Unit tests for energy-contour helpers |
 
 ---
@@ -393,7 +393,7 @@ git commit --no-verify -m "feat: add energy-contour crossfade alignment helpers"
 
 ---
 
-### Task 3: Add S-curve tempo ramp and gain compensation helpers
+### Task 3: Add S-curve tempo ramp and curve selection helpers
 
 **Files:**
 - Modify: `music_assistant/controllers/streams/smart_fades/crossfade_helpers.py`
@@ -406,7 +406,6 @@ Add to `tests/controllers/streams/smart_fades/test_crossfade_helpers.py`:
 ```python
 from music_assistant.controllers.streams.smart_fades.crossfade_helpers import (
     compute_gradual_tempo_steps,
-    compute_gain_compensation_db,
     select_crossfade_curve_type,
     find_fadeout_start,
     find_fadein_entry,
@@ -439,17 +438,6 @@ def test_compute_gradual_tempo_steps_5_percent() -> None:
         assert abs(ratios[i] - ratios[i - 1]) <= 0.006
 
 
-def test_compute_gain_compensation_db() -> None:
-    """Should compute positive dB boost for quieter incoming track."""
-    loud = np.array([0.8, 0.9, 0.7], dtype=np.float32)
-    quiet = np.array([0.2, 0.3, 0.25], dtype=np.float32)
-
-    db = compute_gain_compensation_db(loud, quiet)
-
-    assert db > 0
-    assert db < 10
-
-
 def test_select_crossfade_curve_type_similar() -> None:
     """Similar energy slopes should select equal-power."""
     out = np.linspace(0.8, 0.2, 10, dtype=np.float32)
@@ -475,7 +463,7 @@ def test_select_crossfade_curve_type_divergent() -> None:
 Run: `cd /Users/marvin/git/music-assistant/server && source .venv/bin/activate && pytest tests/controllers/streams/smart_fades/test_crossfade_helpers.py -v`
 Expected: FAIL — `ImportError`
 
-- [ ] **Step 3: Implement the three functions**
+- [ ] **Step 3: Implement the two functions**
 
 Add to `music_assistant/controllers/streams/smart_fades/crossfade_helpers.py`:
 
@@ -521,27 +509,6 @@ def compute_gradual_tempo_steps(
     return steps
 
 
-def compute_gain_compensation_db(
-    outgoing_energy: npt.NDArray[np.float32],
-    incoming_energy: npt.NDArray[np.float32],
-) -> float:
-    """Compute dB gain to balance loudness between tracks.
-
-    :param outgoing_energy: Per-second energy for outgoing track's crossfade region.
-    :param incoming_energy: Per-second energy for incoming track's crossfade region.
-    :return: Gain in dB to apply to incoming track. Positive = boost. Clamped [-6, 6].
-    """
-    out_rms = float(np.mean(outgoing_energy)) if len(outgoing_energy) > 0 else 0.0
-    inc_rms = float(np.mean(incoming_energy)) if len(incoming_energy) > 0 else 0.0
-
-    if inc_rms < 1e-10 or out_rms < 1e-10:
-        return 0.0
-
-    ratio = out_rms / inc_rms
-    db = 20.0 * np.log10(ratio)
-    return float(np.clip(db, -6.0, 6.0))
-
-
 def select_crossfade_curve_type(
     outgoing_energy: npt.NDArray[np.float32],
     incoming_energy: npt.NDArray[np.float32],
@@ -568,18 +535,18 @@ def select_crossfade_curve_type(
 - [ ] **Step 4: Run tests**
 
 Run: `cd /Users/marvin/git/music-assistant/server && source .venv/bin/activate && pytest tests/controllers/streams/smart_fades/ -v`
-Expected: All 9 tests PASS
+Expected: All 8 tests PASS
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add music_assistant/controllers/streams/smart_fades/crossfade_helpers.py tests/controllers/streams/smart_fades/test_crossfade_helpers.py
-git commit --no-verify -m "feat: add S-curve tempo ramp, gain compensation, and curve selection helpers"
+git commit --no-verify -m "feat: add S-curve tempo ramp and curve selection helpers"
 ```
 
 ---
 
-### Task 4: Add GradualTimeStretchFilter and GainCompensationFilter
+### Task 4: Add GradualTimeStretchFilter
 
 **Files:**
 - Modify: `music_assistant/controllers/streams/smart_fades/filters.py`
@@ -634,46 +601,11 @@ class GradualTimeStretchFilter(Filter):
         return f"GradualTimeStretchFilter(steps={n}, {start:.4f}->{end:.4f})"
 ```
 
-- [ ] **Step 3: Add GainCompensationFilter**
-
-```python
-class GainCompensationFilter(Filter):
-    """Apply gain compensation to balance loudness between tracks."""
-
-    output_fadeout_label: str = "fadeout_gain"
-    output_fadein_label: str = "fadein_gain"
-
-    def __init__(self, logger: logging.Logger, fadein_gain_db: float) -> None:
-        """Initialize with dB gain for incoming track.
-
-        :param logger: Logger for debug output.
-        :param fadein_gain_db: Gain in dB. Positive = boost.
-        """
-        super().__init__(logger)
-        self.fadein_gain_db = fadein_gain_db
-
-    def apply(self, input_fadein_label: str, input_fadeout_label: str) -> list[str]:
-        """Build FFmpeg filter string for gain compensation."""
-        if abs(self.fadein_gain_db) < 0.5:
-            self.output_fadeout_label = input_fadeout_label.strip("[]")
-            self.output_fadein_label = input_fadein_label.strip("[]")
-            return []
-
-        return [
-            f"{input_fadeout_label} acopy [{self.output_fadeout_label}]",
-            f"{input_fadein_label} volume={self.fadein_gain_db:.1f}dB [{self.output_fadein_label}]",
-        ]
-
-    def __repr__(self) -> str:
-        """Return string representation."""
-        return f"GainCompensationFilter(fadein={self.fadein_gain_db:.1f}dB)"
-```
-
-- [ ] **Step 4: Commit**
+- [ ] **Step 3: Commit**
 
 ```bash
 git add music_assistant/controllers/streams/smart_fades/filters.py
-git commit --no-verify -m "feat: add GradualTimeStretchFilter and GainCompensationFilter"
+git commit --no-verify -m "feat: add GradualTimeStretchFilter"
 ```
 
 ---
@@ -702,7 +634,6 @@ Add imports at top of fades.py:
 ```python
 from .crossfade_helpers import (
     calculate_energy_crossfade_duration,
-    compute_gain_compensation_db,
     compute_gradual_tempo_steps,
     find_fadein_entry,
     find_fadeout_start,
@@ -718,8 +649,7 @@ In `_build()`, after the existing BPM/stretch setup but before filter chain cons
 2. Call `find_fadeout_start()` and `find_fadein_entry()`
 3. If both succeed, use `calculate_energy_crossfade_duration()` for duration
 4. Use `select_crossfade_curve_type()` for curve selection
-5. Use `compute_gain_compensation_db()` for gain compensation
-6. If energy data is absent or functions return None, fall through to existing bar-counting logic
+5. If energy data is absent or functions return None, fall through to existing bar-counting logic
 
 The implementing engineer should read the full `_build()` method (lines 192-310) and integrate the new energy-contour path as the preferred path, with the existing logic as the fallback. The crossfade_helpers functions return `None` when they can't find clear energy patterns, making the fallback natural.
 
@@ -732,14 +662,13 @@ When BPM difference is 1-5% and downbeats are available, use `compute_gradual_te
 ```python
         self.logger.info(
             "Smart crossfade: %s BPM, energy_aligned=%s, fadeout_start=%.1fs, "
-            "fadein_entry=%.1fs, duration=%.1fs, curve=%s, gain=%.1fdB",
+            "fadein_entry=%.1fs, duration=%.1fs, curve=%s",
             f"{self.fade_out_bpm:.0f}->{self.fade_in_bpm:.0f}",
             energy_aligned,
             fadeout_start or -1,
             fadein_entry or -1,
             crossfade_duration,
             curve_type,
-            gain_db,
         )
 ```
 
@@ -752,7 +681,7 @@ Expected: All tests PASS
 
 ```bash
 git add music_assistant/controllers/streams/smart_fades/fades.py
-git commit --no-verify -m "feat: integrate energy-contour alignment, gradual stretch, and gain compensation into SmartCrossFade"
+git commit --no-verify -m "feat: integrate energy-contour alignment, gradual stretch, and curve selection into SmartCrossFade"
 ```
 
 ---

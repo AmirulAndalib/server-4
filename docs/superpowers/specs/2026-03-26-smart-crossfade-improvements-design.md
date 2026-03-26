@@ -350,9 +350,6 @@ FrequencySweepFilter (lowpass on outgoing, spectral-centroid-derived crossover, 
 FrequencySweepFilter (highpass on incoming, energy-aware curve)
        │
        v
-GainCompensationFilter (volume=XdB on quieter track)
-       │
-       v
 CrossfadeFilter (acrossfade, equal-power or equal-gain based on energy slopes)
        │
        v
