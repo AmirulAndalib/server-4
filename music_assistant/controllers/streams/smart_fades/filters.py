@@ -246,15 +246,30 @@ class CrossfadeFilter(Filter):
     output_fadeout_label: str = "crossfade"
     output_fadein_label: str = "crossfade"
 
-    def __init__(self, logger: logging.Logger, crossfade_duration: float):
-        """Initialize crossfade filter."""
+    def __init__(
+        self,
+        logger: logging.Logger,
+        crossfade_duration: float,
+        curve_type: str | None = None,
+    ):
+        """Initialize crossfade filter.
+
+        :param logger: Logger for debug output.
+        :param crossfade_duration: Crossfade duration in seconds.
+        :param curve_type: Optional FFmpeg acrossfade curve name (e.g. 'qsin', 'tri').
+        """
         self.crossfade_duration = crossfade_duration
+        self.curve_type = curve_type
         super().__init__(logger)
 
     def apply(self, input_fadein_label: str, input_fadeout_label: str) -> list[str]:
         """Apply the acrossfade filter."""
-        return [f"{input_fadeout_label}{input_fadein_label}acrossfade=d={self.crossfade_duration}"]
+        expr = f"{input_fadeout_label}{input_fadein_label}acrossfade=d={self.crossfade_duration}"
+        if self.curve_type:
+            expr += f":c1={self.curve_type}:c2={self.curve_type}"
+        return [expr]
 
     def __repr__(self) -> str:
         """Return string representation of CrossfadeFilter."""
-        return f"Crossfade(d={self.crossfade_duration:.1f}s)"
+        curve = f", curve={self.curve_type}" if self.curve_type else ""
+        return f"Crossfade(d={self.crossfade_duration:.1f}s{curve})"
