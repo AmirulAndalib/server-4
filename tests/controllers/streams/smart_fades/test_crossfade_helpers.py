@@ -1,12 +1,15 @@
-"""Tests for energy-contour crossfade alignment helpers."""
+"""Tests for crossfade alignment helpers (energy, spectral, phrase snapping)."""
 
 import numpy as np
 
 from music_assistant.controllers.streams.smart_fades.crossfade_helpers import (
+    _snap_to_phrase_boundary,
     calculate_energy_crossfade_duration,
     compute_gradual_tempo_steps,
     find_fadein_entry,
     find_fadeout_start,
+    find_spectral_fadein_entry,
+    find_spectral_fadeout_start,
     select_crossfade_curve_type,
 )
 
@@ -133,3 +136,135 @@ def test_select_crossfade_curve_type_divergent() -> None:
     curve = select_crossfade_curve_type(out, inc)
 
     assert curve == "tri"
+
+
+# ---------------------------------------------------------------------------
+# Spectral fadeout tests
+# ---------------------------------------------------------------------------
+
+
+def test_find_spectral_fadeout_start_declining() -> None:
+    """Declining spectral centroid should find a fade-out position."""
+    # 45s: bright (3000 Hz) for 20s, then brightness drops
+    spectral = np.ones(45, dtype=np.float32) * 3000.0
+    spectral[20:] = np.linspace(3000.0, 500.0, 25).astype(np.float32)
+    downbeats = np.arange(0, 45, 2.0)
+
+    result = find_spectral_fadeout_start(spectral, downbeats, bpm=120.0)
+
+    assert result is not None
+    assert 8 <= result <= 22, f"Expected fade start around 8-22s, got {result}"
+
+
+def test_find_spectral_fadeout_start_flat() -> None:
+    """Flat spectral centroid should return None."""
+    spectral = np.ones(45, dtype=np.float32) * 2000.0
+    downbeats = np.arange(0, 45, 2.0)
+
+    result = find_spectral_fadeout_start(spectral, downbeats)
+
+    assert result is None
+
+
+def test_find_spectral_fadeout_start_near_silence() -> None:
+    """Very narrow spectral range should return None."""
+    spectral = np.ones(45, dtype=np.float32) * 100.0
+    spectral += np.random.default_rng(42).uniform(-0.3, 0.3, 45).astype(np.float32)
+    downbeats = np.arange(0, 45, 2.0)
+
+    result = find_spectral_fadeout_start(spectral, downbeats)
+
+    assert result is None
+
+
+def test_find_spectral_fadeout_start_noisy_with_trend() -> None:
+    """Noisy spectral curve with clear downward trend should still detect decline."""
+    rng = np.random.default_rng(42)
+    base = np.ones(45, dtype=np.float32) * 3000.0
+    base[20:] = np.linspace(3000.0, 500.0, 25).astype(np.float32)
+    noise = rng.uniform(-200, 200, 45).astype(np.float32)
+    spectral = base + noise
+    downbeats = np.arange(0, 45, 2.0)
+
+    result = find_spectral_fadeout_start(spectral, downbeats, bpm=120.0)
+
+    assert result is not None
+    assert 8 <= result <= 24, f"Expected fade start around 8-24s, got {result}"
+
+
+# ---------------------------------------------------------------------------
+# Spectral fadein tests
+# ---------------------------------------------------------------------------
+
+
+def test_find_spectral_fadein_entry_rising() -> None:
+    """Rising spectral centroid should find entry before the rise."""
+    spectral = np.ones(45, dtype=np.float32) * 500.0
+    spectral[:10] = 500.0
+    spectral[10:25] = np.linspace(500.0, 3000.0, 15).astype(np.float32)
+    spectral[25:] = 3000.0
+    downbeats = np.arange(0, 45, 2.0)
+
+    result = find_spectral_fadein_entry(spectral, downbeats)
+
+    assert result is not None
+    assert 0 <= result <= 12, f"Expected entry around 0-12s, got {result}"
+
+
+def test_find_spectral_fadein_entry_flat() -> None:
+    """Flat spectral centroid should return None."""
+    spectral = np.ones(45, dtype=np.float32) * 2000.0
+    downbeats = np.arange(0, 45, 2.0)
+
+    result = find_spectral_fadein_entry(spectral, downbeats)
+
+    assert result is None
+
+
+def test_find_spectral_fadein_entry_already_bright() -> None:
+    """Track that starts bright should return None."""
+    spectral = np.ones(45, dtype=np.float32) * 3000.0
+    downbeats = np.arange(0, 45, 2.0)
+
+    result = find_spectral_fadein_entry(spectral, downbeats)
+
+    assert result is None
+
+
+# ---------------------------------------------------------------------------
+# Phrase snapping tests
+# ---------------------------------------------------------------------------
+
+
+def test_snap_to_phrase_boundary_8bar() -> None:
+    """Should snap to an 8-bar phrase boundary when close enough."""
+    downbeats = np.arange(0, 64, 2.0)  # 32 downbeats at 2s intervals
+
+    # Target 17.0s: nearest 8-bar boundary backward is 16.0s (1s away, well within 4 bars)
+    result = _snap_to_phrase_boundary(17.0, downbeats, phrase_len=8, direction="backward")
+
+    assert result is not None
+    assert result == 16.0, f"Expected 8-bar boundary at 16.0s, got {result}"
+
+
+def test_snap_to_phrase_boundary_fallback_to_4bar() -> None:
+    """Should fall back to 4-bar snap when 8-bar is too far."""
+    downbeats = np.arange(0, 64, 2.0)  # 32 downbeats
+
+    # Target at 9.0s: nearest 8-bar boundary is 0s (9s away = 4.5 bars at 2s/bar)
+    # That's > 4 bars, so should fall back to 4-bar boundaries (0, 8, 16, 24...)
+    result = _snap_to_phrase_boundary(9.0, downbeats, phrase_len=8, direction="backward")
+
+    assert result is not None
+    assert result == 8.0, f"Expected 4-bar boundary at 8.0s, got {result}"
+
+
+def test_snap_to_phrase_boundary_few_downbeats() -> None:
+    """With fewer downbeats than phrase_len, should fall back to plain snap."""
+    downbeats = np.array([2.0, 4.0, 6.0])  # Only 3 downbeats
+
+    result = _snap_to_phrase_boundary(5.0, downbeats, phrase_len=8, direction="backward")
+
+    # Falls back to _snap_to_downbeat since < 8 downbeats
+    assert result is not None
+    assert result == 4.0, f"Expected downbeat snap at 4.0s, got {result}"

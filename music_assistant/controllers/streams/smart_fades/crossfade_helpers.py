@@ -1,8 +1,8 @@
-"""Energy-contour helpers for smart crossfade alignment.
+"""Signal-based helpers for smart crossfade alignment.
 
-These functions analyze energy curves at mix time to find optimal
-crossfade start points, entry points, and duration. They operate on
-the ~45-second crossfade buffers, not full songs.
+These functions analyze energy and spectral-centroid curves at mix time
+to find optimal crossfade start points, entry points, and duration.
+They operate on the ~45-second crossfade buffers, not full songs.
 """
 
 from __future__ import annotations
@@ -24,6 +24,11 @@ _RISE_GRADIENT = 0.05
 _RISE_SUSTAINED = 3
 # Entry point must be below this fraction of track peak to be "low energy"
 _LOW_ENERGY_GUARD = 0.5
+
+# Spectral centroid constants (noisier signal, needs wider window + looser thresholds)
+_SPECTRAL_SMOOTH_WINDOW = 5
+_SPECTRAL_DECLINE_THRESHOLD = 0.75
+_SPECTRAL_REMAINING_AVG_GUARD = 0.85
 
 
 def _smooth(
@@ -64,6 +69,40 @@ def _snap_to_downbeat(
         return float(candidates[-1]) if len(candidates) > 0 else None
     idx = int(np.argmin(np.abs(downbeats - target_sec)))
     return float(downbeats[idx])
+
+
+def _snap_to_phrase_boundary(
+    target_sec: float,
+    downbeats: npt.NDArray[np.float64],
+    phrase_len: int = 8,
+    direction: str = "nearest",
+) -> float | None:
+    """Snap a time position to the nearest phrase boundary.
+
+    A phrase boundary is every Nth downbeat (default 8 bars). Falls back
+    to 4-bar boundaries if 8-bar snap moves the position too far, and
+    to plain downbeat snapping if too few downbeats are available.
+
+    :param target_sec: Target time in seconds (buffer-relative).
+    :param downbeats: Downbeat timestamps (buffer-relative).
+    :param phrase_len: Number of bars per phrase (default 8).
+    :param direction: 'nearest', 'forward', or 'backward'.
+    :return: Snapped time, or None if no suitable boundary found.
+    """
+    if len(downbeats) < phrase_len:
+        return _snap_to_downbeat(target_sec, downbeats, direction)
+
+    phrase_boundaries = downbeats[::phrase_len]
+    result = _snap_to_downbeat(target_sec, phrase_boundaries, direction)
+
+    if result is not None and phrase_len == 8 and len(downbeats) >= 4:
+        bar_dur = float(np.median(np.diff(downbeats))) if len(downbeats) > 1 else 2.0
+        if abs(result - target_sec) > 4 * bar_dur:
+            four_bar = _snap_to_downbeat(target_sec, downbeats[::4], direction)
+            if four_bar is not None:
+                return four_bar
+
+    return result
 
 
 def find_fadeout_start(
@@ -143,9 +182,9 @@ def find_fadeout_start(
     early_start_offset = 4.0 * bar_duration  # 4 bars before the knee
     early_start_idx = max(0, knee_idx - early_start_offset)
 
-    snapped = _snap_to_downbeat(float(early_start_idx), downbeats, direction="backward")
+    snapped = _snap_to_phrase_boundary(float(early_start_idx), downbeats, direction="backward")
     if snapped is None:
-        snapped = _snap_to_downbeat(float(early_start_idx), downbeats, direction="forward")
+        snapped = _snap_to_phrase_boundary(float(early_start_idx), downbeats, direction="forward")
 
     logger.debug(
         "fadeout_start: knee at sec %d (energy=%.3f), threshold=%.3f, remaining_avg=%.3f, "
@@ -222,9 +261,9 @@ def find_fadein_entry(
                     break
 
             entry_idx = max(0, quiet_start)
-            snapped = _snap_to_downbeat(float(entry_idx), downbeats, direction="backward")
+            snapped = _snap_to_phrase_boundary(float(entry_idx), downbeats, direction="backward")
             if snapped is None:
-                snapped = _snap_to_downbeat(float(entry_idx), downbeats, direction="forward")
+                snapped = _snap_to_phrase_boundary(float(entry_idx), downbeats, direction="forward")
             logger.debug(
                 "fadein_entry: rise detected at sec %d (energy=%.3f, gradient=[%.3f,%.3f,%.3f]), "
                 "quiet_start=%d, entry_idx=%d, snapped=%.1fs",
@@ -403,3 +442,177 @@ def select_crossfade_curve_type(
     if slope_sum < 0.05:
         return "qsin"  # Equal-power — slopes are complementary
     return "tri"  # Equal-gain — slopes are divergent
+
+
+# ---------------------------------------------------------------------------
+# Spectral-centroid helpers
+# ---------------------------------------------------------------------------
+
+
+def _normalize_spectral(
+    spectral: npt.NDArray[np.float32],
+) -> npt.NDArray[np.float32]:
+    """Min-max normalize spectral centroid (Hz) to 0-1 within the buffer.
+
+    :param spectral: Per-second spectral centroid values in Hz.
+    :return: Normalized curve (0-1), or ones if range is negligible.
+    """
+    sc_min = float(spectral.min())
+    sc_range = float(spectral.max()) - sc_min
+    if sc_range < 1.0:
+        return np.ones_like(spectral)
+    return ((spectral - sc_min) / sc_range).astype(np.float32)
+
+
+def find_spectral_fadeout_start(
+    spectral_tail: npt.NDArray[np.float32],
+    downbeats: npt.NDArray[np.float64],
+    bpm: float = 120.0,
+) -> float | None:
+    """Find where the outgoing track's spectral brightness starts declining.
+
+    Same logic as find_fadeout_start but operates on the spectral centroid
+    curve with wider smoothing and looser thresholds, since spectral centroid
+    is noisier and declines more gradually than RMS energy.
+
+    :param spectral_tail: Per-second spectral centroid for the last ~45s (buffer-relative).
+    :param downbeats: Downbeat timestamps in buffer-relative seconds.
+    :param bpm: BPM of the outgoing track.
+    :return: Fade-out start time in buffer-relative seconds, or None if no clear decline.
+    """
+    if len(spectral_tail) < _SPECTRAL_SMOOTH_WINDOW + 1:
+        logger.debug("spectral_fadeout: too short (%d values)", len(spectral_tail))
+        return None
+
+    normalized = _normalize_spectral(spectral_tail)
+    smoothed = _smooth(normalized, window=_SPECTRAL_SMOOTH_WINDOW)
+    peak_idx = int(np.argmax(smoothed))
+    peak_val = float(smoothed[peak_idx])
+
+    if peak_val < 0.05:
+        logger.debug("spectral_fadeout: near-flat (peak=%.3f), returning None", peak_val)
+        return None
+
+    threshold = peak_val * _SPECTRAL_DECLINE_THRESHOLD
+
+    knee_idx = None
+    for i in range(peak_idx, len(smoothed)):
+        if smoothed[i] < threshold:
+            knee_idx = i
+            break
+
+    if knee_idx is None:
+        logger.debug(
+            "spectral_fadeout: no decline — brightness stays above %.3f (%.0f%% of peak) until end",
+            threshold,
+            _SPECTRAL_DECLINE_THRESHOLD * 100,
+        )
+        return None
+
+    if knee_idx >= len(smoothed) - _SPECTRAL_SMOOTH_WINDOW:
+        logger.debug(
+            "spectral_fadeout: knee at sec %d is in smoothing edge zone, returning None",
+            knee_idx,
+        )
+        return None
+
+    remaining_avg = float(np.mean(smoothed[knee_idx:]))
+    if remaining_avg > peak_val * _SPECTRAL_REMAINING_AVG_GUARD:
+        logger.debug(
+            "spectral_fadeout: knee at sec %d is a transient dip "
+            "(remaining_avg=%.3f > %.3f), returning None",
+            knee_idx,
+            remaining_avg,
+            peak_val * _SPECTRAL_REMAINING_AVG_GUARD,
+        )
+        return None
+
+    bar_duration = 4.0 * (60.0 / bpm)
+    early_start_offset = 4.0 * bar_duration
+    early_start_idx = max(0, knee_idx - early_start_offset)
+
+    snapped = _snap_to_phrase_boundary(float(early_start_idx), downbeats, direction="backward")
+    if snapped is None:
+        snapped = _snap_to_phrase_boundary(float(early_start_idx), downbeats, direction="forward")
+
+    logger.debug(
+        "spectral_fadeout: knee at sec %d (brightness=%.3f), threshold=%.3f, "
+        "remaining_avg=%.3f, early_start=%.1fs, snapped=%.1fs",
+        knee_idx,
+        float(smoothed[knee_idx]),
+        threshold,
+        remaining_avg,
+        early_start_idx,
+        snapped if snapped is not None else -1,
+    )
+    return snapped
+
+
+def find_spectral_fadein_entry(
+    spectral_head: npt.NDArray[np.float32],
+    downbeats: npt.NDArray[np.float64],
+) -> float | None:
+    """Find where the incoming track's spectral brightness begins rising.
+
+    Same logic as find_fadein_entry but operates on the spectral centroid
+    curve with wider smoothing.
+
+    :param spectral_head: Per-second spectral centroid for the first ~45s (buffer-relative).
+    :param downbeats: Downbeat timestamps in buffer-relative seconds.
+    :return: Fade-in entry time in buffer-relative seconds, or None if no clear build.
+    """
+    if len(spectral_head) < _RISE_SUSTAINED + 2:
+        logger.debug("spectral_fadein: too short (%d values)", len(spectral_head))
+        return None
+
+    normalized = _normalize_spectral(spectral_head)
+    smoothed = _smooth(normalized, window=_SPECTRAL_SMOOTH_WINDOW)
+    gradient = np.gradient(smoothed)
+    track_peak = float(np.max(smoothed))
+
+    if track_peak < 0.05:
+        logger.debug("spectral_fadein: near-flat (peak=%.3f), returning None", track_peak)
+        return None
+
+    for i in range(len(gradient) - _RISE_SUSTAINED):
+        if all(gradient[i : i + _RISE_SUSTAINED] > _RISE_GRADIENT):
+            if smoothed[i] > track_peak * _LOW_ENERGY_GUARD:
+                logger.debug(
+                    "spectral_fadein: rise at sec %d but brightness=%.3f > guard %.3f, skip",
+                    i,
+                    float(smoothed[i]),
+                    track_peak * _LOW_ENERGY_GUARD,
+                )
+                continue
+
+            quiet_threshold = track_peak * 0.2
+            quiet_start = i
+            for j in range(i - 1, -1, -1):
+                if smoothed[j] <= quiet_threshold:
+                    quiet_start = j
+                    break
+                if i - j > 20:
+                    quiet_start = j
+                    break
+
+            entry_idx = max(0, quiet_start)
+            snapped = _snap_to_phrase_boundary(float(entry_idx), downbeats, direction="backward")
+            if snapped is None:
+                snapped = _snap_to_phrase_boundary(float(entry_idx), downbeats, direction="forward")
+            logger.debug(
+                "spectral_fadein: rise at sec %d (brightness=%.3f), "
+                "quiet_start=%d, entry_idx=%d, snapped=%.1fs",
+                i,
+                float(smoothed[i]),
+                quiet_start,
+                entry_idx,
+                snapped if snapped is not None else -1,
+            )
+            return snapped
+
+    logger.debug(
+        "spectral_fadein: no sustained rise > %.3f found in %d seconds",
+        _RISE_GRADIENT,
+        len(gradient),
+    )
+    return None
