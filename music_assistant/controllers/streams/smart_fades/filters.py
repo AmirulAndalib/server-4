@@ -47,6 +47,47 @@ class TimeStretchFilter(Filter):
         return f"TimeStretch(ratio={self.stretch_ratio:.2f})"
 
 
+class GradualTimeStretchFilter(Filter):
+    """Gradual tempo change using asendcmd + rubberband with S-curve steps."""
+
+    output_fadeout_label: str = "fadeout_gradstretch"
+    output_fadein_label: str = "fadein_unchanged"
+
+    def __init__(self, logger: logging.Logger, tempo_steps: list[tuple[float, float]]) -> None:
+        """Initialize with tempo steps from compute_gradual_tempo_steps.
+
+        :param logger: Logger for debug output.
+        :param tempo_steps: List of (timestamp_seconds, tempo_ratio) tuples.
+        """
+        super().__init__(logger)
+        self.tempo_steps = tempo_steps
+
+    def apply(self, input_fadein_label: str, input_fadeout_label: str) -> list[str]:
+        """Build FFmpeg filter string for gradual time stretching."""
+        if not self.tempo_steps:
+            self.output_fadeout_label = input_fadeout_label.strip("[]")
+            self.output_fadein_label = input_fadein_label.strip("[]")
+            return []
+
+        cmd_parts = [f"{ts:.3f} [rb] tempo {ratio:.6f}" for ts, ratio in self.tempo_steps]
+        cmd_string = "; ".join(cmd_parts)
+        initial_ratio = self.tempo_steps[0][1]
+
+        return [
+            f"{input_fadeout_label} asendcmd=c='{cmd_string}',"
+            f"rubberband@rb=tempo={initial_ratio:.6f}:transients=smooth:detector=soft:pitchq=speed"
+            f" [{self.output_fadeout_label}]",
+            f"{input_fadein_label} acopy [{self.output_fadein_label}]",
+        ]
+
+    def __repr__(self) -> str:
+        """Return string representation."""
+        n = len(self.tempo_steps)
+        start = self.tempo_steps[0][1] if self.tempo_steps else 1.0
+        end = self.tempo_steps[-1][1] if self.tempo_steps else 1.0
+        return f"GradualTimeStretchFilter(steps={n}, {start:.4f}->{end:.4f})"
+
+
 class TrimFilter(Filter):
     """Filter that trims incoming track to align with downbeats."""
 
