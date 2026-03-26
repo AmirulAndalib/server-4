@@ -7,8 +7,13 @@ the ~45-second crossfade buffers, not full songs.
 
 from __future__ import annotations
 
+import logging
+from typing import TYPE_CHECKING
+
 import numpy as np
 import numpy.typing as npt
+
+logger = logging.getLogger(__name__)
 
 # Smoothing window for energy curve (seconds)
 _SMOOTH_WINDOW = 3
@@ -76,14 +81,24 @@ def find_fadeout_start(
     :return: Fade-out start time in buffer-relative seconds, or None if no clear decline.
     """
     if len(energy_tail) < 4:
+        logger.debug("fadeout_start: too short (%d values)", len(energy_tail))
         return None
 
     smoothed = _smooth(energy_tail)
     peak_idx = int(np.argmax(smoothed))
     peak_val = float(smoothed[peak_idx])
 
+    logger.debug(
+        "fadeout_start: smoothed peak=%.3f at sec %d, tail energy=[%s...%s]",
+        peak_val,
+        peak_idx,
+        ", ".join(f"{v:.2f}" for v in smoothed[:5]),
+        ", ".join(f"{v:.2f}" for v in smoothed[-5:]),
+    )
+
     if peak_val < 0.05:
-        return None  # Near-silence throughout
+        logger.debug("fadeout_start: near-silence (peak=%.3f), returning None", peak_val)
+        return None
 
     threshold = peak_val * _DECLINE_THRESHOLD
 
@@ -95,18 +110,38 @@ def find_fadeout_start(
             break
 
     if knee_idx is None:
-        return None  # No clear decline — energy stays high until end
+        logger.debug(
+            "fadeout_start: no decline found — energy stays above %.3f (85%% of peak) until end",
+            threshold,
+        )
+        return None
 
     # Ignore edge effects from smoothing (knee in last few samples of a flat signal)
     if knee_idx >= len(smoothed) - _SMOOTH_WINDOW:
+        logger.debug("fadeout_start: knee at sec %d is in smoothing edge zone, returning None", knee_idx)
         return None
 
     # Verify there's actually a meaningful decline (not just a dip)
     remaining_energy = float(np.mean(smoothed[knee_idx:]))
     if remaining_energy > peak_val * 0.9:
-        return None  # Energy recovers — this is a transient dip, not a real decline
+        logger.debug(
+            "fadeout_start: knee at sec %d is a transient dip (remaining_avg=%.3f > %.3f), returning None",
+            knee_idx,
+            remaining_energy,
+            peak_val * 0.9,
+        )
+        return None
 
-    return _snap_to_downbeat(float(knee_idx), downbeats, direction="forward")
+    snapped = _snap_to_downbeat(float(knee_idx), downbeats, direction="forward")
+    logger.debug(
+        "fadeout_start: knee at sec %d (energy=%.3f), threshold=%.3f, remaining_avg=%.3f, snapped=%.1fs",
+        knee_idx,
+        float(smoothed[knee_idx]),
+        threshold,
+        remaining_energy,
+        snapped if snapped is not None else -1,
+    )
+    return snapped
 
 
 def find_fadein_entry(
@@ -124,25 +159,61 @@ def find_fadein_entry(
     :return: Fade-in entry time in buffer-relative seconds, or None if no clear build.
     """
     if len(energy_head) < _RISE_SUSTAINED + 2:
+        logger.debug("fadein_entry: too short (%d values)", len(energy_head))
         return None
 
     smoothed = _smooth(energy_head)
     gradient = np.gradient(smoothed)
     track_peak = float(np.max(smoothed))
 
+    logger.debug(
+        "fadein_entry: smoothed peak=%.3f, head energy=[%s...%s]",
+        track_peak,
+        ", ".join(f"{v:.2f}" for v in smoothed[:5]),
+        ", ".join(f"{v:.2f}" for v in smoothed[-5:]),
+    )
+
     if track_peak < 0.05:
-        return None  # Near-silence throughout
+        logger.debug("fadein_entry: near-silence (peak=%.3f), returning None", track_peak)
+        return None
 
     # Find first sustained positive gradient (building energy)
     for i in range(len(gradient) - _RISE_SUSTAINED):
         if all(gradient[i : i + _RISE_SUSTAINED] > _RISE_GRADIENT):
             # Verify energy is actually low here (guard against "already loud" sections)
             if smoothed[i] > track_peak * _LOW_ENERGY_GUARD:
-                continue  # Energy already high — keep looking
+                logger.debug(
+                    "fadein_entry: sustained rise at sec %d but energy=%.3f > guard %.3f (50%% of peak), skipping",
+                    i,
+                    float(smoothed[i]),
+                    track_peak * _LOW_ENERGY_GUARD,
+                )
+                continue
             entry_idx = max(0, i - 1)
-            return _snap_to_downbeat(float(entry_idx), downbeats, direction="backward")
+            snapped = _snap_to_downbeat(float(entry_idx), downbeats, direction="backward")
+            logger.debug(
+                "fadein_entry: rise detected at sec %d (energy=%.3f, gradient=[%.3f,%.3f,%.3f]), "
+                "entry_idx=%d, snapped=%.1fs",
+                i,
+                float(smoothed[i]),
+                float(gradient[i]),
+                float(gradient[i + 1]),
+                float(gradient[i + 2]),
+                entry_idx,
+                snapped if snapped is not None else -1,
+            )
+            return snapped
 
-    return None  # No clear build detected
+    logger.debug(
+        "fadein_entry: no sustained rise > %.3f found in %d seconds. "
+        "Max gradient=%.3f at sec %d. Low energy guard=%.3f",
+        _RISE_GRADIENT,
+        len(gradient),
+        float(np.max(gradient)),
+        int(np.argmax(gradient)),
+        track_peak * _LOW_ENERGY_GUARD,
+    )
+    return None
 
 
 def calculate_energy_crossfade_duration(
@@ -174,25 +245,37 @@ def calculate_energy_crossfade_duration(
         fadein_entry = 0
 
     out_energy_at_start = float(energy_out[fadeout_start])
+    bar_duration = 4 * (60.0 / bpm)
 
     # Find where incoming track reaches outgoing track's energy level
+    match_idx = None
     for i in range(fadein_entry, len(energy_in)):
         if energy_in[i] >= out_energy_at_start:
             duration = float(i - fadein_entry)
+            match_idx = i
             break
     else:
-        # Song B never reaches Song A's level — use 8 bars
-        bar_duration = 4 * (60.0 / bpm)
         duration = 8 * bar_duration
 
     # Add 1 bar blend buffer
-    bar_duration = 4 * (60.0 / bpm)
     duration += bar_duration
 
     # Snap to nearest bar boundary
     duration = round(duration / bar_duration) * bar_duration
+    final_duration = float(np.clip(duration, min_seconds, max_seconds))
 
-    return float(np.clip(duration, min_seconds, max_seconds))
+    logger.debug(
+        "crossfade_duration: out_energy_at_fadeout=%.3f, "
+        "in_energy_at_entry=%.3f, energy_match_at_sec=%s, "
+        "raw_duration=%.1fs, bar_dur=%.1fs, final=%.1fs",
+        out_energy_at_start,
+        float(energy_in[fadein_entry]) if fadein_entry < len(energy_in) else 0,
+        f"{match_idx}" if match_idx is not None else "never (using 8 bars)",
+        duration,
+        bar_duration,
+        final_duration,
+    )
+    return final_duration
 
 
 def compute_gradual_tempo_steps(
