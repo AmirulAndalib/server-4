@@ -110,13 +110,13 @@ No pre-computed phrase boundaries needed. The crossfade code directly analyzes `
 **Musical problem:** System uses fixed curve shapes (exponential for short crossfades, logarithmic/linear for long) regardless of actual energy profiles. This means:
 - A track with a natural outro fade gets an artificial fade on top, creating double-dipping
 - A loud track blasting into another loud track uses the same curve as a quiet transition
-- No gain compensation between tracks of different loudness
+- No awareness of energy profiles between tracks
 
 **Musical rules:**
 - Use `energy_curve` RMS data to select curves dynamically
 - If outgoing track has natural volume drop (outro fade), follow it instead of imposing artificial curve — or use shallower artificial curve
 - If incoming track has natural build, match highpass filter removal to track's natural spectral opening
-- Calculate average RMS of both tracks in crossfade region, apply gain compensation so louder track doesn't dominate
+- Both tracks high energy during overlap = faster crossfade to avoid loudness buildup
 - Both tracks high energy during overlap = faster crossfade to avoid loudness buildup
 - Use energy curve slope to choose between equal-power and equal-gain crossfade
 
@@ -128,7 +128,6 @@ No pre-computed phrase boundaries needed. The crossfade code directly analyzes `
 
 **Implementation approach:**
 - Extends existing `FrequencySweepFilter` volume expression pattern (already uses `eval=frame`)
-- **Gain compensation:** Compute average RMS from both tracks' `energy_curve` arrays in crossfade region. Add a static `volume=XdB` filter on the quieter track. Trivial new filter step.
 - **Dynamic curves:** Pre-compute volume envelope from `energy_curve` in Python. Encode as piecewise-linear volume expression:
   ```
   volume='if(lt(t,T1),V1,if(lt(t,T2),V2,...))':eval=frame
@@ -325,7 +324,7 @@ All improvements check for field presence and fall back to current behavior when
 |----------|-------------------|-----------------|-------------|
 | Prereq | None | Optional fields on AudioAnalysisData | None |
 | 1 | None | Energy-contour analysis at mix time | None |
-| 2 | Richer volume expressions | Energy slope analysis, gain computation | None |
+| 2 | Richer volume expressions | Energy slope analysis, curve selection | None |
 | 3 | `asendcmd` for tempo scheduling | S-curve sigmoid computation | GradualTimeStretchFilter |
 | 4 | `concat`, `aevalsrc` | BPM gap detection, silence scaling | EnergyFadeCrossFade |
 | 5 | None | Camelot wheel compatibility | None |
