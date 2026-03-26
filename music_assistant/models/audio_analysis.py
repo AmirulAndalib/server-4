@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -25,6 +26,11 @@ class AudioAnalysisData(DataClassDictMixin):
     downbeats: npt.NDArray[np.float64] | None = None
     # General
     duration: float | None = None
+    # Extended analysis (populated by smart fades provider)
+    energy_curve: npt.NDArray[np.float32] | None = None
+    spectral_centroid_curve: npt.NDArray[np.float32] | None = None
+    phrase_boundaries: list[Any] | None = None  # list[PhraseBoundary] at runtime
+    musical_key: dict[str, Any] | None = None  # MusicalKey as dict for serialization
 
     class Config(BaseConfig):  # noqa: D106
         serialization_strategy = {
