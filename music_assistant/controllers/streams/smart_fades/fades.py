@@ -165,7 +165,8 @@ class SmartCrossFade(SmartFade):
     """Smart fades class that implements a Smart Fade mode."""
 
     # Only apply time stretching if BPM difference is < this %
-    time_stretch_bpm_percentage_threshold: float = 5.0
+    # Gradual S-curve stretch is imperceptible up to 10% with beat-level stepping
+    time_stretch_bpm_percentage_threshold: float = 10.0
 
     def __init__(
         self,
@@ -317,6 +318,26 @@ class SmartCrossFade(SmartFade):
         ) = self._try_energy_alignment()
         crossfade_bars: int = 0
 
+        # Apply BPM-aware max bar clamp to energy-aligned duration
+        if energy_aligned and crossfade_duration > 0:
+            bar_duration = 4 * (60.0 / self.fade_in_bpm)
+            if bpm_diff_percent <= 5.0:
+                max_bars = 16
+            elif bpm_diff_percent <= 10.0:
+                max_bars = 12
+            else:
+                max_bars = 4
+            max_duration = max_bars * bar_duration
+            if crossfade_duration > max_duration:
+                self.logger.debug(
+                    "Clamping energy duration from %.1fs to %.1fs (max %d bars at %.1f%% BPM diff)",
+                    crossfade_duration,
+                    max_duration,
+                    max_bars,
+                    bpm_diff_percent,
+                )
+                crossfade_duration = max_duration
+
         # === Fallback: bar-counting approach ===
         if not energy_aligned:
             self.logger.debug(
@@ -343,13 +364,27 @@ class SmartCrossFade(SmartFade):
         if 0.1 < bpm_diff_percent <= self.time_stretch_bpm_percentage_threshold and (
             crossfade_bars > 4 or energy_aligned
         ):
-            # Use gradual stretch for small BPM differences with sufficient downbeats
-            stretch_downbeats = fadeout_downbeats_rel if energy_aligned else self.fade_out_downbeats
-            if bpm_diff_percent > 0.5 and len(stretch_downbeats) >= 4:
+            # Use beat-level stepping for >3% BPM diff (more steps = smoother ramp)
+            # Use downbeat-level stepping for <=3% (fewer steps sufficient)
+            if bpm_diff_percent > 3.0:
+                stretch_timestamps = (
+                    self.fade_out_beats[self.fade_out_beats < SMART_CROSSFADE_DURATION]
+                    if not energy_aligned
+                    else self.fade_out_beats[
+                        self.fade_out_beats >= max(0, self.fade_out_duration - SMART_CROSSFADE_DURATION)
+                    ]
+                    - max(0, self.fade_out_duration - SMART_CROSSFADE_DURATION)
+                )
+            else:
+                stretch_timestamps = (
+                    fadeout_downbeats_rel if energy_aligned else self.fade_out_downbeats
+                )
+
+            if bpm_diff_percent > 0.5 and len(stretch_timestamps) >= 4:
                 tempo_steps = compute_gradual_tempo_steps(
                     start_ratio=1.0,
                     end_ratio=bpm_ratio,
-                    downbeats=stretch_downbeats,
+                    downbeats=stretch_timestamps,
                 )
                 if tempo_steps:
                     self.filters.append(GradualTimeStretchFilter(self.logger, tempo_steps))
@@ -503,7 +538,12 @@ class SmartCrossFade(SmartFade):
         bpm_diff_percent = abs(1.0 - bpm_in / bpm_out) * 100
 
         # Calculate ideal bars based on BPM compatibility
-        ideal_bars = 10 if bpm_diff_percent <= self.time_stretch_bpm_percentage_threshold else 6
+        if bpm_diff_percent <= 5.0:
+            ideal_bars = 10
+        elif bpm_diff_percent <= 10.0:
+            ideal_bars = 6
+        else:
+            ideal_bars = 3
 
         # Reduce bars until it fits in the fadein buffer
         for bars in [ideal_bars, 8, 6, 4, 2, 1]:
