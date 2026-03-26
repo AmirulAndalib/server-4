@@ -217,7 +217,18 @@ async def test_extended_analysis_fields(provider: SmartFadesProvider) -> None:
     # Musical key should be detected
     assert analysis.musical_key is not None
     assert analysis.musical_key["root"] in [
-        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+        "C",
+        "C#",
+        "D",
+        "D#",
+        "E",
+        "F",
+        "F#",
+        "G",
+        "G#",
+        "A",
+        "A#",
+        "B",
     ]
     assert analysis.musical_key["mode"] in ["major", "minor"]
     assert 0.0 <= analysis.musical_key["confidence"] <= 1.0

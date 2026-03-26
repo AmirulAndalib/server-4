@@ -250,7 +250,7 @@ class SmartCrossFade(SmartFade):
             len(fadein_downbeats_rel),
         )
 
-        fadeout_start = find_fadeout_start(energy_out, fadeout_downbeats_rel)
+        fadeout_start = find_fadeout_start(energy_out, fadeout_downbeats_rel, bpm=self.fade_out_bpm)
         fadein_entry = find_fadein_entry(energy_in, fadein_downbeats_rel)
 
         if fadeout_start is None or fadein_entry is None:

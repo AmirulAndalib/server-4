@@ -335,7 +335,9 @@ class SmartFadesProvider(AudioAnalysisProvider):
         # Extended analysis: spectral centroid + chroma from shared STFT
         if len(pcm_22k) >= 2048:
             centroid, chroma = await asyncio.to_thread(
-                compute_stft_features, pcm_22k, ANALYSIS_SAMPLE_RATE,
+                compute_stft_features,
+                pcm_22k,
+                ANALYSIS_SAMPLE_RATE,
             )
             if len(centroid) > 0:
                 data.centroid_chunks.append(centroid)

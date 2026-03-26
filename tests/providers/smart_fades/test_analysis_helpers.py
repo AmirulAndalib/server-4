@@ -1,7 +1,6 @@
 """Tests for smart fades analysis helper functions."""
 
 import numpy as np
-import pytest
 
 from music_assistant.providers.smart_fades.analysis_helpers import (
     compute_rms_per_second,
@@ -66,7 +65,9 @@ def test_compute_stft_features_sine_wave() -> None:
     assert chroma_per_sec.shape == (duration, 12)
     # 440 Hz = A4, which is chroma bin 9 (A). Should be dominant.
     mean_chroma = chroma_per_sec.mean(axis=0)
-    assert np.argmax(mean_chroma) == 9, f"Expected A (bin 9) dominant, got bin {np.argmax(mean_chroma)}"
+    assert np.argmax(mean_chroma) == 9, (
+        f"Expected A (bin 9) dominant, got bin {np.argmax(mean_chroma)}"
+    )
 
 
 def test_compute_stft_features_empty() -> None:

@@ -1,7 +1,6 @@
 """Tests for energy-contour crossfade alignment helpers."""
 
 import numpy as np
-import pytest
 
 from music_assistant.controllers.streams.smart_fades.crossfade_helpers import (
     calculate_energy_crossfade_duration,
@@ -13,18 +12,19 @@ from music_assistant.controllers.streams.smart_fades.crossfade_helpers import (
 
 
 def test_find_fadeout_start_clear_decline() -> None:
-    """Should find the knee where energy drops below 85% of peak."""
+    """Should find an early start point before the energy knee."""
     # 45 seconds: high energy for 20s, then decline
     energy = np.ones(45, dtype=np.float32) * 0.9
     energy[20:] = np.linspace(0.9, 0.1, 25).astype(np.float32)
     # Downbeats every 2s (120 BPM, 4/4)
     downbeats = np.arange(0, 45, 2.0)
 
-    result = find_fadeout_start(energy, downbeats)
+    result = find_fadeout_start(energy, downbeats, bpm=120.0)
 
-    # Peak at ~sec 19, 85% threshold = 0.765. Decline crosses this around sec 22-24.
+    # Knee is around sec 22-24. With 4 bars (8s at 120 BPM) early offset,
+    # the fade start should be around sec 14-18.
     assert result is not None
-    assert 20 <= result <= 28, f"Expected fade start around 20-28s, got {result}"
+    assert 10 <= result <= 22, f"Expected fade start around 10-22s, got {result}"
 
 
 def test_find_fadeout_start_flat_energy() -> None:
@@ -39,7 +39,7 @@ def test_find_fadeout_start_flat_energy() -> None:
 
 
 def test_find_fadein_entry_clear_build() -> None:
-    """Should find the entry point where energy is low and about to rise."""
+    """Should find the entry point in the quiet section before the rise."""
     # 45 seconds: quiet for 10s, then build to full energy
     energy = np.zeros(45, dtype=np.float32)
     energy[:10] = 0.1
@@ -49,9 +49,9 @@ def test_find_fadein_entry_clear_build() -> None:
 
     result = find_fadein_entry(energy, downbeats)
 
-    # Should enter before the build starts (~sec 8-12)
+    # Should enter in the quiet section well before the build (~sec 0-10)
     assert result is not None
-    assert 4 <= result <= 14, f"Expected entry around 4-14s, got {result}"
+    assert 0 <= result <= 12, f"Expected entry around 0-12s, got {result}"
 
 
 def test_find_fadein_entry_already_loud() -> None:
@@ -65,7 +65,7 @@ def test_find_fadein_entry_already_loud() -> None:
 
 
 def test_calculate_energy_crossfade_duration() -> None:
-    """Duration should cover the energy handoff period."""
+    """Duration should cover the energy handoff with musical minimum."""
     # Song A declining from 0.8
     energy_out = np.linspace(0.8, 0.1, 30).astype(np.float32)
     # Song B rising from 0.1 to 0.9
@@ -79,9 +79,13 @@ def test_calculate_energy_crossfade_duration() -> None:
         bpm=120.0,
     )
 
-    # Song A starts at 0.8. Song B reaches 0.8 at ~index 26.
-    # Plus 1 bar blend buffer (2s at 120 BPM).
-    assert 4 <= duration <= 40, f"Expected duration 4-40s, got {duration}"
+    # At 120 BPM, 8 bars = 16s (musical minimum).
+    # Song B reaches 0.8 at ~index 26, plus 4 bars (8s) post-match = 34s.
+    # So duration should be at least 16s (8-bar minimum) and up to ~34s.
+    bar_duration = 4 * (60.0 / 120.0)
+    min_musical = 8 * bar_duration  # 16s
+    assert duration >= min_musical, f"Expected duration >= {min_musical}s, got {duration}"
+    assert duration <= 40, f"Expected duration <= 40s, got {duration}"
 
 
 def test_compute_gradual_tempo_steps_5_percent() -> None:
@@ -89,7 +93,9 @@ def test_compute_gradual_tempo_steps_5_percent() -> None:
     downbeats = np.arange(0, 20, 2.0)
 
     steps = compute_gradual_tempo_steps(
-        start_ratio=1.0, end_ratio=1.05, downbeats=downbeats,
+        start_ratio=1.0,
+        end_ratio=1.05,
+        downbeats=downbeats,
     )
 
     assert len(steps) > 0
