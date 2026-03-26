@@ -348,3 +348,200 @@ CrossfadeFilter (acrossfade, equal-power or equal-gain based on energy slopes)
        v
 [Harmonic awareness adjusts crossfade_duration and crossover_freq before chain runs]
 ```
+
+---
+
+## Audio Analysis Provider Design
+
+All 4 new analysis features are computed within the **existing `SmartFadesProvider`** — not as separate providers. This avoids redundant PCM decode+resample overhead and leverages the 22050 Hz mono PCM and mel spectrograms already computed for Beat This!.
+
+**Total additional CPU:** ~1.85ms per 10-second block + ~1.12ms once at finalize. Zero new pip dependencies.
+
+---
+
+### Feature 1: `energy_curve` — Per-Second RMS Energy
+
+**Approach:** Compute RMS directly from `pcm_22k` in `_process_block()`.
+
+```python
+# 22050 samples = 1 second. Reshape and compute RMS per second.
+n_samples_per_sec = 22050
+n_full_seconds = len(pcm_22k) // n_samples_per_sec
+trimmed = pcm_22k[:n_full_seconds * n_samples_per_sec]
+frames = trimmed.reshape(n_full_seconds, n_samples_per_sec)
+rms_values = np.sqrt(np.mean(frames ** 2, axis=1)).astype(np.float32)
+```
+
+- **Compute phase:** `_process_block()` — append RMS values per block
+- **Finalize:** Normalize to [0, 1] by track peak: `energy_curve /= energy_curve.max()`
+- **CPU:** ~0.1ms per 10s block
+- **Edge case:** Keep a small sample remainder buffer between blocks for exact second alignment
+
+---
+
+### Feature 2: `spectral_centroid_curve` — Per-Second Brightness
+
+**Approach:** Derive from existing 128-bin mel spectrogram (pre-log-compression magnitudes).
+
+The mel spectrogram is already computed at 50 fps by `AdvancedBeatFeatureExtractor`. Spectral centroid is the weighted mean of mel bin center frequencies, weighted by mel magnitudes:
+
+```python
+centroid = sum(mel_center_freqs * mel_magnitudes) / sum(mel_magnitudes)
+```
+
+Average across frames per second to get per-second values.
+
+**Why mel-derived over separate FFT:**
+- Zero additional computation — reuses existing mel spectrogram
+- Consistent mel bias across all tracks makes relative comparisons valid
+- Mel scale approximates human perception, arguably better for crossfade decisions
+- Saves ~6.5ms per 10s block vs. separate FFT approach
+
+**Implementation:** Modify `AdvancedBeatFeatureExtractor.process_pcm()` to return raw mel magnitudes (before log compression) alongside log-mel features. Alternatively, compute centroid internally within the feature extractor and return it as a side output. The provider accumulates per-second centroid averages.
+
+- **Compute phase:** `_process_block()` — derive from mel spectrogram
+- **CPU:** ~0.05ms per 10s block
+- **Memory:** Negligible — only per-second scalar values stored
+
+---
+
+### Feature 3: `musical_key` — Key Detection via Chroma
+
+**Approach:** Streaming chroma accumulation + Krumhansl-Schmuckler key profiles at finalize.
+
+**Per-block (in `_process_block()`):** Compute 12-bin chroma vector from `pcm_22k` via FFT (n_fft=4096, hop=2048). Accumulate chroma energy per second with timestamps.
+
+```python
+KRUMHANSL_MAJOR = [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
+KRUMHANSL_MINOR = [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
+
+# At finalize: correlate accumulated chroma with key profiles
+# For each of 12 root notes × 2 modes (major/minor):
+#   rotated_chroma = np.roll(chroma, -shift)
+#   correlation = np.corrcoef(rotated_chroma, profile)[0, 1]
+# Best correlation = detected key
+```
+
+**Intro/outro filtering:** Discard first 10s and last 10s of chroma data at finalize before averaging. Intros often have ambient/sparse instrumentation that skews the key profile.
+
+**Implementation:** Store chroma per-second during streaming (12 floats × duration_seconds = ~2.4 KB for 5-min track). At finalize, trim edges, average, correlate.
+
+- **Compute phase:** `_process_block()` — chroma FFT accumulation
+- **Finalize:** Key correlation + confidence scoring
+- **CPU:** ~1.7ms per 10s block + ~0.1ms at finalize
+- **Accuracy:** ~70-80% on pop/rock/electronic. Sufficient for crossfade key compatibility scoring. A neural model (e.g., madmom CNN) would get ~85%+ but adds significant CPU. Not justified for this use case.
+- **Confidence mapping:** Map correlation [-1, 1] to confidence [0, 1]. Low confidence = don't use key info for crossfade decisions.
+
+---
+
+### Feature 4: `phrase_boundaries` — Structural Boundary Detection
+
+**Approach:** Heuristic detection from downbeats + energy curve + spectral centroid at finalize. No separate ML model.
+
+**Algorithm:** Check 4-bar, 8-bar, and 16-bar downbeat boundaries. Score each by combined energy delta + spectral centroid delta. Classify as "section" (major structural change) or "phrase" (minor structural division).
+
+```python
+def _detect_phrase_boundaries(
+    downbeats: np.ndarray,
+    energy_curve: np.ndarray,
+    centroid_curve: np.ndarray,
+    bpm: float,
+) -> list[PhraseBoundary]:
+    for i, db_time in enumerate(downbeats):
+        is_16bar = (i % 16 == 0)
+        is_8bar = (i % 8 == 0)
+        is_4bar = (i % 4 == 0)
+        if not is_4bar:
+            continue
+
+        # Energy delta (2s window before/after)
+        energy_delta = abs(e_after - e_before) / max(e_before, 1e-10)
+
+        # Spectral centroid delta (catches timbral changes energy misses)
+        centroid_delta = abs(c_after - c_before) / max(c_before, 1e-10)
+
+        # Combined score: weighted sum
+        combined_score = 0.6 * energy_delta + 0.4 * centroid_delta
+
+        # Lower threshold for longer bar groupings (stronger prior)
+        # 16-bar: > 0.15 (almost certainly real if any change detected)
+        # 8-bar: > 0.25 (section if > 0.5, phrase otherwise)
+        # 4-bar: > 0.4 (only if very significant change)
+```
+
+**Why this over Foote novelty / self-similarity matrix:**
+- v1 simplicity — covers the crossfade use case well for pop/rock/electronic/hip-hop
+- Zero memory overhead (no stored mel vectors needed)
+- Foote novelty can be added in v2 if heuristic proves insufficient
+- Energy + centroid deltas catch both loudness transitions AND timbral changes (e.g., synth pad entering, filter sweep)
+
+**16-bar detection:** Critical for EDM. At 128 BPM in 4/4, 16 bars = 32 seconds. Missing these = missing drops, breakdowns, builds.
+
+**Spectral centroid delta:** Catches transitions that energy alone misses — a chorus and verse can have similar energy but very different spectral content.
+
+- **Compute phase:** N/A — computed at finalize from already-available data
+- **CPU at finalize:** ~0.1ms (small array operations)
+- **Accuracy:** Sufficient for crossfade phrase alignment. Within 1-2 bars. Quantized to nearest downbeat.
+
+---
+
+### Audio Analysis Data Flow
+
+```
+PCM chunk (raw, any sample rate)
+  |
+  v
+decode + resample to pcm_22k (22050 Hz mono) [EXISTING]
+  |
+  +---> mel spectrogram extraction (128 mels, 50 fps) [EXISTING, for Beat This]
+  |       |
+  |       +---> spectral centroid per second [NEW, from pre-log mel magnitudes]
+  |
+  +---> RMS energy per second [NEW, from pcm_22k]
+  |
+  +---> chroma accumulation (12-bin, per second) [NEW, FFT on pcm_22k]
+
+At finalize:
+  |
+  +---> Beat This inference [EXISTING] -> beats, downbeats, bpm
+  |
+  +---> energy normalization to [0, 1] [NEW]
+  |
+  +---> key detection from trimmed chroma [NEW] -> MusicalKey
+  |
+  +---> phrase boundaries from downbeats + energy + centroid [NEW]
+  |
+  +---> store ExtendedSmartFadesAnalysis [MODIFIED to include new fields]
+```
+
+### Files to Modify
+
+1. **`music_assistant/providers/smart_fades/provider.py`** — Main changes:
+   - Extend `SmartFadesData` with: `energy_chunks`, `centroid_chunks`, `chroma_per_second`, `cumulative_time`
+   - Add RMS energy computation in `_process_block()`
+   - Add chroma FFT accumulation in `_process_block()`
+   - Add key detection, phrase boundary detection, energy normalization in `finalize()`
+   - Store results as `ExtendedSmartFadesAnalysis`
+
+2. **`music_assistant/providers/smart_fades/feature_extractor.py`** — Expose pre-log mel magnitudes for spectral centroid derivation (modify `process_pcm()` return type or add centroid computation internally)
+
+3. **`music_assistant/models/audio_analysis.py`** — Add optional fields to `AudioAnalysisData`: `phrase_boundaries`, `energy_curve`, `spectral_centroid_curve`, `musical_key`
+
+4. **New file: `music_assistant/providers/smart_fades/analysis_helpers.py`** — Helper functions:
+   - `compute_rms_per_second(pcm_22k, sr) -> np.ndarray`
+   - `compute_spectral_centroid_per_second(mel_magnitudes, mel_freqs, fps) -> np.ndarray`
+   - `accumulate_chroma(pcm_22k, sr) -> np.ndarray`
+   - `detect_key(chroma_per_second, duration) -> MusicalKey`
+   - `detect_phrase_boundaries(downbeats, energy, centroid, bpm) -> list[PhraseBoundary]`
+
+### CPU Budget Summary
+
+| Feature | Per 10s block (RPi4) | At finalize | Memory |
+|---------|---------------------|-------------|--------|
+| RMS energy | ~0.1ms | ~0.01ms (normalize) | ~4 bytes/sec |
+| Spectral centroid (mel-derived) | ~0.05ms | — | ~4 bytes/sec |
+| Chroma accumulation | ~1.7ms | ~0.1ms (key detect) | ~48 bytes/sec |
+| Phrase boundaries | — | ~0.1ms | — |
+| **Total additional** | **~1.85ms** | **~0.21ms** | **~56 bytes/sec** |
+
+**Comparison:** Existing Beat This mel extraction costs ~50-100ms per 10s block. Additional analysis adds ~2% overhead.
