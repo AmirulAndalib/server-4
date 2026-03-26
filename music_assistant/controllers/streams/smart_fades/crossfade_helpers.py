@@ -193,3 +193,82 @@ def calculate_energy_crossfade_duration(
     duration = round(duration / bar_duration) * bar_duration
 
     return float(np.clip(duration, min_seconds, max_seconds))
+
+
+def compute_gradual_tempo_steps(
+    start_ratio: float,
+    end_ratio: float,
+    downbeats: npt.NDArray[np.float64],
+    max_step_pct: float = 0.005,
+) -> list[tuple[float, float]]:
+    """Compute S-curve tempo steps aligned to downbeats.
+
+    :param start_ratio: Starting tempo ratio (e.g., 1.0).
+    :param end_ratio: Target tempo ratio (e.g., 1.05).
+    :param downbeats: Downbeat timestamps to align steps to.
+    :param max_step_pct: Maximum tempo change per step as a fraction.
+    :return: List of (timestamp_seconds, tempo_ratio) tuples.
+    """
+    total_change = abs(end_ratio - start_ratio)
+    if total_change < 1e-6:
+        return []
+
+    min_steps = max(1, int(np.ceil(total_change / max_step_pct)))
+    n_steps = min(min_steps, len(downbeats))
+    if n_steps < 1:
+        return [(0.0, end_ratio)]
+
+    # S-curve (sigmoid) with steepness adapted to keep max step within budget
+    if n_steps == 1:
+        sigmoid_values = np.array([1.0])
+    else:
+        # Binary search for the steepest k where max step <= max_step_pct
+        avg_step = total_change / (n_steps - 1)
+        k_lo, k_hi = 0.1, 10.0
+        for _ in range(20):
+            k_mid = (k_lo + k_hi) / 2.0
+            x = np.linspace(-1, 1, n_steps)
+            s = 1.0 / (1.0 + np.exp(-k_mid * x))
+            s = (s - s[0]) / (s[-1] - s[0])
+            deltas = np.diff(s) * total_change
+            if float(np.max(deltas)) <= max_step_pct:
+                k_lo = k_mid
+            else:
+                k_hi = k_mid
+        k = k_lo
+        x = np.linspace(-1, 1, n_steps)
+        sigmoid_values = 1.0 / (1.0 + np.exp(-k * x))
+        sigmoid_values = (sigmoid_values - sigmoid_values[0]) / (sigmoid_values[-1] - sigmoid_values[0])
+
+    steps: list[tuple[float, float]] = []
+    for i in range(n_steps):
+        timestamp = float(downbeats[i]) if i < len(downbeats) else float(downbeats[-1])
+        ratio = start_ratio + (end_ratio - start_ratio) * float(sigmoid_values[i])
+        steps.append((timestamp, round(ratio, 6)))
+
+    return steps
+
+
+def select_crossfade_curve_type(
+    outgoing_energy: npt.NDArray[np.float32],
+    incoming_energy: npt.NDArray[np.float32],
+) -> str:
+    """Select crossfade curve based on energy slope comparison.
+
+    :param outgoing_energy: Per-second energy for outgoing track's crossfade region.
+    :param incoming_energy: Per-second energy for incoming track's crossfade region.
+    :return: FFmpeg acrossfade curve name ('qsin' or 'tri').
+    """
+    if len(outgoing_energy) < 2 or len(incoming_energy) < 2:
+        return "tri"
+
+    out_slope = float(np.polyfit(np.arange(len(outgoing_energy)), outgoing_energy, 1)[0])
+    inc_slope = float(np.polyfit(np.arange(len(incoming_energy)), incoming_energy, 1)[0])
+
+    # Complementary slopes (out declining + in rising at similar rate) → equal-power
+    # Divergent slopes (magnitudes differ significantly) → equal-gain
+    slope_sum = abs(out_slope + inc_slope)
+
+    if slope_sum < 0.05:
+        return "qsin"  # Equal-power — slopes are complementary
+    return "tri"  # Equal-gain — slopes are divergent

@@ -4,9 +4,11 @@ import numpy as np
 import pytest
 
 from music_assistant.controllers.streams.smart_fades.crossfade_helpers import (
-    find_fadeout_start,
-    find_fadein_entry,
     calculate_energy_crossfade_duration,
+    compute_gradual_tempo_steps,
+    find_fadein_entry,
+    find_fadeout_start,
+    select_crossfade_curve_type,
 )
 
 
@@ -80,3 +82,48 @@ def test_calculate_energy_crossfade_duration() -> None:
     # Song A starts at 0.8. Song B reaches 0.8 at ~index 26.
     # Plus 1 bar blend buffer (2s at 120 BPM).
     assert 4 <= duration <= 40, f"Expected duration 4-40s, got {duration}"
+
+
+def test_compute_gradual_tempo_steps_5_percent() -> None:
+    """5% tempo change should produce S-curve steps with max 0.5% per step."""
+    downbeats = np.arange(0, 20, 2.0)
+
+    steps = compute_gradual_tempo_steps(
+        start_ratio=1.0, end_ratio=1.05, downbeats=downbeats,
+    )
+
+    assert len(steps) > 0
+    ratios = [s[1] for s in steps]
+    assert abs(ratios[0] - 1.0) < 0.01
+    assert abs(ratios[-1] - 1.05) < 0.001
+
+    # S-curve: middle steps change faster than edges
+    if len(ratios) > 4:
+        early_delta = abs(ratios[1] - ratios[0])
+        mid_idx = len(ratios) // 2
+        mid_delta = abs(ratios[mid_idx] - ratios[mid_idx - 1])
+        assert mid_delta > early_delta
+
+    # Max step <= 0.5%
+    for i in range(1, len(ratios)):
+        assert abs(ratios[i] - ratios[i - 1]) <= 0.006
+
+
+def test_select_crossfade_curve_type_similar() -> None:
+    """Similar energy slopes should select equal-power."""
+    out = np.linspace(0.8, 0.2, 10, dtype=np.float32)
+    inc = np.linspace(0.2, 0.8, 10, dtype=np.float32)
+
+    curve = select_crossfade_curve_type(out, inc)
+
+    assert curve == "qsin"
+
+
+def test_select_crossfade_curve_type_divergent() -> None:
+    """Divergent slopes should select equal-gain."""
+    out = np.linspace(0.8, 0.2, 10, dtype=np.float32)
+    inc = np.ones(10, dtype=np.float32) * 0.5
+
+    curve = select_crossfade_curve_type(out, inc)
+
+    assert curve == "tri"
