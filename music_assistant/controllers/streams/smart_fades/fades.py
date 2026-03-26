@@ -401,6 +401,22 @@ class SmartCrossFade(SmartFade):
                 bpm=self.fade_out_bpm,
             )
 
+            # Compensate energy-aligned fadeout position for time stretch.
+            # The fadeout_start_pos was computed from the unstretched energy curve
+            # but will be applied to post-stretch audio. When bpm_ratio < 1.0
+            # (slowing down), audio gets longer, so positions shift forward.
+            # Note: fadein_start_pos is for Song B which is NOT stretched.
+            # Note: crossfade_duration is kept in Song B's time domain (unscaled)
+            # since acrossfade uses a single duration for both streams and Song B's
+            # alignment matters more (it's the track the listener transitions into).
+            if energy_aligned and fadeout_start_pos is not None:
+                fadeout_start_pos = fadeout_start_pos / bpm_ratio
+                self.logger.debug(
+                    "Adjusted energy fadeout_start for time stretch: %.1fs (ratio=%.4f)",
+                    fadeout_start_pos,
+                    bpm_ratio,
+                )
+
         if fadein_start_pos and fadein_start_pos + crossfade_duration <= SMART_CROSSFADE_DURATION:
             self.filters.append(TrimFilter(logger=self.logger, fadein_start_pos=fadein_start_pos))
         else:
