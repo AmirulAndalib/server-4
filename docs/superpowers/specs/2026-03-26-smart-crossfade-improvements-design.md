@@ -355,7 +355,7 @@ CrossfadeFilter (acrossfade, equal-power or equal-gain based on energy slopes)
 
 All 4 new analysis features are computed within the **existing `SmartFadesProvider`** — not as separate providers. This avoids redundant PCM decode+resample overhead and leverages the 22050 Hz mono PCM and mel spectrograms already computed for Beat This!.
 
-**Total additional CPU:** ~1.85ms per 10-second block + ~1.12ms once at finalize. Zero new pip dependencies.
+**Total additional CPU:** ~8.3ms per 10-second block + ~0.21ms once at finalize. Zero new pip dependencies.
 
 ---
 
@@ -381,26 +381,40 @@ rms_values = np.sqrt(np.mean(frames ** 2, axis=1)).astype(np.float32)
 
 ### Feature 2: `spectral_centroid_curve` — Per-Second Brightness
 
-**Approach:** Derive from existing 128-bin mel spectrogram (pre-log-compression magnitudes).
-
-The mel spectrogram is already computed at 50 fps by `AdvancedBeatFeatureExtractor`. Spectral centroid is the weighted mean of mel bin center frequencies, weighted by mel magnitudes:
+**Approach:** Compute spectral centroid from short-time FFT on `pcm_22k` (separate from mel spectrogram).
 
 ```python
-centroid = sum(mel_center_freqs * mel_magnitudes) / sum(mel_magnitudes)
+def _compute_spectral_centroid_per_second(pcm_22k: np.ndarray, sr: int = 22050) -> np.ndarray:
+    hop = 512
+    n_fft = 2048
+    results = []
+    for sec_start in range(0, len(pcm_22k) - sr + 1, sr):
+        chunk = pcm_22k[sec_start:sec_start + sr]
+        centroids = []
+        for frame_start in range(0, len(chunk) - n_fft + 1, hop):
+            frame = chunk[frame_start:frame_start + n_fft]
+            windowed = frame * np.hanning(n_fft)
+            magnitude = np.abs(np.fft.rfft(windowed))
+            freqs = np.fft.rfftfreq(n_fft, 1.0 / sr)
+            mag_sum = magnitude.sum()
+            if mag_sum > 1e-10:
+                centroids.append(np.sum(freqs * magnitude) / mag_sum)
+            else:
+                centroids.append(0.0)
+        results.append(np.mean(centroids))
+    return np.array(results, dtype=np.float32)
 ```
 
-Average across frames per second to get per-second values.
+**Why direct FFT over mel-derived:**
+- Mel scale compresses the 8-16 kHz region where hi-hats, cymbals, and sibilance live — the primary brightness differentiators between tracks
+- Direct FFT preserves linear frequency resolution, giving accurate centroid values
+- ~6.5ms per 10s block is ~0.065% of real-time — negligible even on RPi
+- Crossfade EQ decisions (crossover frequency selection) benefit from accurate spectral centroid, not perceptually warped values
 
-**Why mel-derived over separate FFT:**
-- Zero additional computation — reuses existing mel spectrogram
-- Consistent mel bias across all tracks makes relative comparisons valid
-- Mel scale approximates human perception, arguably better for crossfade decisions
-- Saves ~6.5ms per 10s block vs. separate FFT approach
+**Note:** A mel-derived approach (~0.05ms/block) is available as a future optimization if CPU becomes a concern. The consistent mel bias makes relative comparisons valid, but direct FFT is preferred for v1 accuracy.
 
-**Implementation:** Modify `AdvancedBeatFeatureExtractor.process_pcm()` to return raw mel magnitudes (before log compression) alongside log-mel features. Alternatively, compute centroid internally within the feature extractor and return it as a side output. The provider accumulates per-second centroid averages.
-
-- **Compute phase:** `_process_block()` — derive from mel spectrogram
-- **CPU:** ~0.05ms per 10s block
+- **Compute phase:** `_process_block()` — FFT on `pcm_22k`
+- **CPU:** ~6.5ms per 10s block (~43 FFTs/sec, each ~0.015ms on RPi4)
 - **Memory:** Negligible — only per-second scalar values stored
 
 ---
@@ -494,10 +508,10 @@ PCM chunk (raw, any sample rate)
 decode + resample to pcm_22k (22050 Hz mono) [EXISTING]
   |
   +---> mel spectrogram extraction (128 mels, 50 fps) [EXISTING, for Beat This]
-  |       |
-  |       +---> spectral centroid per second [NEW, from pre-log mel magnitudes]
   |
   +---> RMS energy per second [NEW, from pcm_22k]
+  |
+  +---> spectral centroid per second [NEW, FFT on pcm_22k]
   |
   +---> chroma accumulation (12-bin, per second) [NEW, FFT on pcm_22k]
 
@@ -517,19 +531,20 @@ At finalize:
 ### Files to Modify
 
 1. **`music_assistant/providers/smart_fades/provider.py`** — Main changes:
-   - Extend `SmartFadesData` with: `energy_chunks`, `centroid_chunks`, `chroma_per_second`, `cumulative_time`
+   - Extend `SmartFadesData` with: `energy_chunks`, `centroid_chunks`, `chroma_per_second`, `cumulative_seconds`
    - Add RMS energy computation in `_process_block()`
+   - Add spectral centroid FFT computation in `_process_block()`
    - Add chroma FFT accumulation in `_process_block()`
    - Add key detection, phrase boundary detection, energy normalization in `finalize()`
    - Store results as `ExtendedSmartFadesAnalysis`
 
-2. **`music_assistant/providers/smart_fades/feature_extractor.py`** — Expose pre-log mel magnitudes for spectral centroid derivation (modify `process_pcm()` return type or add centroid computation internally)
+2. **`music_assistant/providers/smart_fades/feature_extractor.py`** — No changes needed (spectral centroid computed via separate FFT, not from mel spectrogram)
 
 3. **`music_assistant/models/audio_analysis.py`** — Add optional fields to `AudioAnalysisData`: `phrase_boundaries`, `energy_curve`, `spectral_centroid_curve`, `musical_key`
 
 4. **New file: `music_assistant/providers/smart_fades/analysis_helpers.py`** — Helper functions:
    - `compute_rms_per_second(pcm_22k, sr) -> np.ndarray`
-   - `compute_spectral_centroid_per_second(mel_magnitudes, mel_freqs, fps) -> np.ndarray`
+   - `compute_spectral_centroid_per_second(pcm_22k, sr) -> np.ndarray`
    - `accumulate_chroma(pcm_22k, sr) -> np.ndarray`
    - `detect_key(chroma_per_second, duration) -> MusicalKey`
    - `detect_phrase_boundaries(downbeats, energy, centroid, bpm) -> list[PhraseBoundary]`
@@ -539,9 +554,11 @@ At finalize:
 | Feature | Per 10s block (RPi4) | At finalize | Memory |
 |---------|---------------------|-------------|--------|
 | RMS energy | ~0.1ms | ~0.01ms (normalize) | ~4 bytes/sec |
-| Spectral centroid (mel-derived) | ~0.05ms | — | ~4 bytes/sec |
-| Chroma accumulation | ~1.7ms | ~0.1ms (key detect) | ~48 bytes/sec |
+| Spectral centroid (direct FFT) | ~6.5ms | — | ~4 bytes/sec |
+| Chroma accumulation (FFT) | ~1.7ms | ~0.1ms (key detect) | ~48 bytes/sec |
 | Phrase boundaries | — | ~0.1ms | — |
-| **Total additional** | **~1.85ms** | **~0.21ms** | **~56 bytes/sec** |
+| **Total additional** | **~8.3ms** | **~0.21ms** | **~56 bytes/sec** |
 
-**Comparison:** Existing Beat This mel extraction costs ~50-100ms per 10s block. Additional analysis adds ~2% overhead.
+**Comparison:** Existing Beat This mel extraction costs ~50-100ms per 10s block. Additional analysis adds ~8-16% overhead.
+
+**Future optimization:** If CPU becomes a concern on low-power devices, spectral centroid can be switched to mel-derived approach (~0.05ms instead of ~6.5ms) at the cost of reduced accuracy in the 8-16 kHz range.
