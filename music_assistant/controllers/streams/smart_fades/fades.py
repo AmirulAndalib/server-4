@@ -212,6 +212,11 @@ class SmartCrossFade(SmartFade):
         """
         empty_downbeats: npt.NDArray[np.float64] = np.array([])
         if self.fade_out_energy is None or self.fade_in_energy is None:
+            self.logger.debug(
+                "Energy alignment skipped: fade_out_energy=%s, fade_in_energy=%s",
+                "present" if self.fade_out_energy is not None else "None",
+                "present" if self.fade_in_energy is not None else "None",
+            )
             return False, None, 0.0, None, empty_downbeats
 
         buffer_secs = min(SMART_CROSSFADE_DURATION, int(self.fade_out_duration))
@@ -230,10 +235,29 @@ class SmartCrossFade(SmartFade):
             self.fade_in_downbeats < SMART_CROSSFADE_DURATION
         ]
 
+        self.logger.debug(
+            "Energy alignment attempt: energy_out=%d values (range %.2f-%.2f), "
+            "energy_in=%d values (range %.2f-%.2f), "
+            "fadeout_downbeats=%d, fadein_downbeats=%d",
+            len(energy_out),
+            float(energy_out.min()) if len(energy_out) > 0 else 0,
+            float(energy_out.max()) if len(energy_out) > 0 else 0,
+            len(energy_in),
+            float(energy_in.min()) if len(energy_in) > 0 else 0,
+            float(energy_in.max()) if len(energy_in) > 0 else 0,
+            len(fadeout_downbeats_rel),
+            len(fadein_downbeats_rel),
+        )
+
         fadeout_start = find_fadeout_start(energy_out, fadeout_downbeats_rel)
         fadein_entry = find_fadein_entry(energy_in, fadein_downbeats_rel)
 
         if fadeout_start is None or fadein_entry is None:
+            self.logger.debug(
+                "Energy alignment failed: fadeout_start=%s, fadein_entry=%s",
+                f"{fadeout_start:.1f}s" if fadeout_start is not None else "None (no clear decline)",
+                f"{fadein_entry:.1f}s" if fadein_entry is not None else "None (no clear build)",
+            )
             return False, None, 0.0, None, fadeout_downbeats_rel
 
         crossfade_duration = calculate_energy_crossfade_duration(
@@ -282,10 +306,22 @@ class SmartCrossFade(SmartFade):
 
         # === Fallback: bar-counting approach ===
         if not energy_aligned:
+            self.logger.debug(
+                "Energy alignment failed, falling back to beat/tempo-based alignment "
+                "(BPM diff=%.1f%%, bpm_ratio=%.3f)",
+                bpm_diff_percent,
+                bpm_ratio,
+            )
             crossfade_bars = self._calculate_optimal_crossfade_bars()
             fadein_start_pos = self._calculate_optimal_fade_timing(crossfade_bars)
             crossfade_duration = self._calculate_crossfade_duration(crossfade_bars=crossfade_bars)
-
+        else:
+            self.logger.debug(
+                "Energy alignment successful: fadein_start=%.1fs, duration=%.1fs, curve=%s",
+                fadein_start_pos,
+                crossfade_duration,
+                curve_type or "default",
+            )
         # === Build filter chain ===
 
         # Add time stretch filter if needed
