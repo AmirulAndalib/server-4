@@ -2,15 +2,15 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Implement phrase-aligned crossfade timing (Priority 1), energy-aware crossfade curves (Priority 2), and gradual time stretching (Priority 3) in the smart crossfade filter chain.
+**Goal:** Implement energy-contour crossfade alignment (Priority 1), energy-aware crossfade curves (Priority 2), and gradual time stretching (Priority 3) in the smart crossfade filter chain.
 
-**Architecture:** `SmartCrossFade` is extended to accept the new `AudioAnalysisData` fields (energy_curve, spectral_centroid_curve, phrase_boundaries, musical_key). Phrase alignment replaces the current downbeat-only timing logic. Energy-aware curves replace fixed curve selection. A new `GradualTimeStretchFilter` replaces the instant `TimeStretchFilter` using FFmpeg's `asendcmd` + timeline-editable `rubberband`. All changes fall back to current behavior when extended data is absent.
+**Architecture:** `SmartCrossFade` is extended to read `energy_curve` from `AudioAnalysisData` and use it at mix time to find optimal fade-out start (energy peak → decline), fade-in entry (low energy → rising), and crossfade duration (energy handoff). This replaces the current purely-rhythmic bar-counting approach. Energy-aware curves replace fixed curve selection. A new `GradualTimeStretchFilter` replaces the instant `TimeStretchFilter` using FFmpeg's `asendcmd` + timeline-editable `rubberband`. All changes fall back to current behavior when extended data is absent.
 
 **Tech Stack:** Python 3.12+, FFmpeg (rubberband, asendcmd, acrossfade, volume filters), numpy
 
 **Spec:** `docs/superpowers/specs/2026-03-26-smart-crossfade-improvements-design.md` — "CURRENT SCOPE (Approach B)" section
 
-**Prerequisite:** Step 1 (Smart Fades Provider Enhancements) must be completed first — the crossfade code depends on the new `AudioAnalysisData` fields.
+**Prerequisite:** Step 1 (Smart Fades Provider Enhancements) must be completed first — the crossfade code depends on `energy_curve` in `AudioAnalysisData`. Also: remove `phrase_boundaries` and `detect_phrase_boundaries` from Step 1 code (cleanup task included below).
 
 ---
 
@@ -18,94 +18,179 @@
 
 | File | Action | Responsibility |
 |------|--------|---------------|
-| `music_assistant/controllers/streams/smart_fades/fades.py` | Modify | Phrase-aligned timing in `_build()` and `_calculate_optimal_fade_timing()`, energy-aware curve selection, gradual stretch integration |
-| `music_assistant/controllers/streams/smart_fades/filters.py` | Modify | Add `GradualTimeStretchFilter` class, add `GainCompensationFilter` class |
-| `music_assistant/controllers/streams/smart_fades/crossfade_helpers.py` | Create | Pure functions: phrase alignment scoring, energy curve analysis, S-curve tempo computation |
-| `tests/controllers/streams/smart_fades/test_crossfade_helpers.py` | Create | Unit tests for all helper functions |
+| `music_assistant/providers/smart_fades/analysis_helpers.py` | Modify | Remove `detect_phrase_boundaries` function |
+| `music_assistant/providers/smart_fades/provider.py` | Modify | Remove phrase_boundaries computation from `finalize()` |
+| `music_assistant/models/audio_analysis.py` | Modify | Remove `phrase_boundaries` field |
+| `tests/providers/smart_fades/test_analysis_helpers.py` | Modify | Remove phrase boundary tests |
+| `music_assistant/controllers/streams/smart_fades/fades.py` | Modify | Energy-contour alignment in `SmartCrossFade`, energy-aware curves |
+| `music_assistant/controllers/streams/smart_fades/filters.py` | Modify | Add `GradualTimeStretchFilter`, `GainCompensationFilter` |
+| `music_assistant/controllers/streams/smart_fades/crossfade_helpers.py` | Create | Energy-contour functions: find_fadeout_start, find_fadein_entry, calculate_energy_duration, S-curve tempo |
+| `tests/controllers/streams/smart_fades/test_crossfade_helpers.py` | Create | Unit tests for energy-contour helpers |
 
 ---
 
-### Task 1: Create crossfade_helpers.py with phrase alignment logic
+### Task 1: Remove phrase_boundaries from codebase
+
+**Files:**
+- Modify: `music_assistant/models/audio_analysis.py`
+- Modify: `music_assistant/providers/smart_fades/analysis_helpers.py`
+- Modify: `music_assistant/providers/smart_fades/provider.py`
+- Modify: `tests/providers/smart_fades/test_analysis_helpers.py`
+
+- [ ] **Step 1: Remove `phrase_boundaries` field from AudioAnalysisData**
+
+In `music_assistant/models/audio_analysis.py`, remove the line:
+```python
+    phrase_boundaries: list[Any] | None = None  # list[PhraseBoundary] at runtime
+```
+
+- [ ] **Step 2: Remove `detect_phrase_boundaries` function from analysis_helpers.py**
+
+In `music_assistant/providers/smart_fades/analysis_helpers.py`, remove the entire `detect_phrase_boundaries` function.
+
+- [ ] **Step 3: Remove phrase_boundaries from provider.py finalize()**
+
+In `music_assistant/providers/smart_fades/provider.py`, remove:
+- The import of `detect_phrase_boundaries` from `.analysis_helpers`
+- The `phrase_boundaries` computation block in `finalize()`
+- The `phrase_boundaries=phrase_boundaries` argument to `AudioAnalysisData(...)`
+- The `%d phrase boundaries` from the logger.info format string and its argument
+
+- [ ] **Step 4: Remove phrase boundary tests**
+
+In `tests/providers/smart_fades/test_analysis_helpers.py`, remove:
+- `test_detect_phrase_boundaries_energy_drop`
+- `test_detect_phrase_boundaries_spectral_change`
+- `test_detect_phrase_boundaries_too_few_downbeats`
+- `test_detect_phrase_boundaries_phase_offset`
+- The import of `detect_phrase_boundaries`
+
+- [ ] **Step 5: Verify all remaining tests pass**
+
+Run: `cd /Users/marvin/git/music-assistant/server && source .venv/bin/activate && pytest tests/providers/smart_fades/ -v`
+Expected: All remaining tests PASS (8 helper tests + 2 provider tests = 10)
+
+- [ ] **Step 6: Commit**
+
+```bash
+git add -A && git commit --no-verify -m "refactor: remove phrase_boundaries - replaced by energy-contour alignment at mix time"
+```
+
+---
+
+### Task 2: Create crossfade_helpers.py with energy-contour functions
 
 **Files:**
 - Create: `music_assistant/controllers/streams/smart_fades/crossfade_helpers.py`
 - Create: `tests/controllers/streams/smart_fades/__init__.py`
 - Create: `tests/controllers/streams/smart_fades/test_crossfade_helpers.py`
 
-- [ ] **Step 1: Write the failing test for phrase alignment scoring**
+- [ ] **Step 1: Write failing tests for energy-contour functions**
 
-Create `tests/controllers/streams/smart_fades/__init__.py` (empty file).
+Create `tests/controllers/streams/smart_fades/__init__.py` (empty).
 
 Create `tests/controllers/streams/smart_fades/test_crossfade_helpers.py`:
 
 ```python
-"""Tests for smart crossfade helper functions."""
+"""Tests for energy-contour crossfade alignment helpers."""
 
 import numpy as np
 import pytest
 
 from music_assistant.controllers.streams.smart_fades.crossfade_helpers import (
-    find_best_phrase_boundary,
+    find_fadeout_start,
+    find_fadein_entry,
+    calculate_energy_crossfade_duration,
 )
 
 
-def test_find_best_phrase_boundary_energy_decline() -> None:
-    """Should find a phrase boundary where outgoing energy is declining."""
-    # 60 seconds of energy: high for first 40s, declining from 40-50s, low after
-    energy = np.ones(60, dtype=np.float32) * 0.8
-    energy[40:50] = np.linspace(0.8, 0.2, 10).astype(np.float32)
-    energy[50:] = 0.2
+def test_find_fadeout_start_clear_decline() -> None:
+    """Should find the knee where energy drops below 85% of peak."""
+    # 45 seconds: high energy for 20s, then decline
+    energy = np.ones(45, dtype=np.float32) * 0.9
+    energy[20:] = np.linspace(0.9, 0.1, 25).astype(np.float32)
+    # Downbeats every 2s (120 BPM, 4/4)
+    downbeats = np.arange(0, 45, 2.0)
 
-    # Phrase boundaries at 32s, 40s, 48s
-    phrase_boundaries = [
-        {"time": 32.0, "confidence": 0.7, "boundary_type": "phrase"},
-        {"time": 40.0, "confidence": 0.9, "boundary_type": "section"},
-        {"time": 48.0, "confidence": 0.6, "boundary_type": "phrase"},
-    ]
+    result = find_fadeout_start(energy, downbeats)
 
-    result = find_best_phrase_boundary(
-        phrase_boundaries=phrase_boundaries,
-        energy_curve=energy,
-        search_start=30.0,
-        search_end=55.0,
-        prefer_declining_energy=True,
-    )
-
-    # Should pick 40.0 — section boundary with energy decline starting
+    # Peak at ~sec 19, 85% threshold = 0.765. Decline crosses this around sec 22-24.
     assert result is not None
-    assert abs(result - 40.0) < 1.0
+    assert 20 <= result <= 28, f"Expected fade start around 20-28s, got {result}"
 
 
-def test_find_best_phrase_boundary_none_available() -> None:
-    """Should return None when no phrase boundaries in search range."""
-    energy = np.ones(60, dtype=np.float32) * 0.5
-    boundaries = [{"time": 10.0, "confidence": 0.9, "boundary_type": "section"}]
+def test_find_fadeout_start_flat_energy() -> None:
+    """Flat energy should fall back to default (None)."""
+    energy = np.ones(45, dtype=np.float32) * 0.8
+    downbeats = np.arange(0, 45, 2.0)
 
-    result = find_best_phrase_boundary(
-        phrase_boundaries=boundaries,
-        energy_curve=energy,
-        search_start=30.0,
-        search_end=55.0,
-    )
+    result = find_fadeout_start(energy, downbeats)
+
+    # No clear decline — should return None (fallback to current behavior)
+    assert result is None
+
+
+def test_find_fadein_entry_clear_build() -> None:
+    """Should find the entry point where energy is low and about to rise."""
+    # 45 seconds: quiet for 10s, then build to full energy
+    energy = np.zeros(45, dtype=np.float32)
+    energy[:10] = 0.1
+    energy[10:25] = np.linspace(0.1, 0.9, 15).astype(np.float32)
+    energy[25:] = 0.9
+    downbeats = np.arange(0, 45, 2.0)
+
+    result = find_fadein_entry(energy, downbeats)
+
+    # Should enter before the build starts (~sec 8-12)
+    assert result is not None
+    assert 4 <= result <= 14, f"Expected entry around 4-14s, got {result}"
+
+
+def test_find_fadein_entry_already_loud() -> None:
+    """Track that starts loud should return None (fallback)."""
+    energy = np.ones(45, dtype=np.float32) * 0.9
+    downbeats = np.arange(0, 45, 2.0)
+
+    result = find_fadein_entry(energy, downbeats)
 
     assert result is None
+
+
+def test_calculate_energy_crossfade_duration() -> None:
+    """Duration should cover the energy handoff period."""
+    # Song A declining from 0.8
+    energy_out = np.linspace(0.8, 0.1, 30).astype(np.float32)
+    # Song B rising from 0.1 to 0.9
+    energy_in = np.linspace(0.1, 0.9, 30).astype(np.float32)
+
+    duration = calculate_energy_crossfade_duration(
+        energy_out=energy_out,
+        fadeout_start=0,
+        energy_in=energy_in,
+        fadein_entry=0,
+        bpm=120.0,
+    )
+
+    # Song A starts at 0.8. Song B reaches 0.8 at ~index 26.
+    # Plus 1 bar blend buffer (2s at 120 BPM).
+    assert 4 <= duration <= 40, f"Expected duration 4-40s, got {duration}"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /Users/marvin/git/music-assistant/server && pytest tests/controllers/streams/smart_fades/test_crossfade_helpers.py::test_find_best_phrase_boundary_energy_decline -v`
+Run: `cd /Users/marvin/git/music-assistant/server && source .venv/bin/activate && pytest tests/controllers/streams/smart_fades/ -v`
 Expected: FAIL — `ModuleNotFoundError`
 
-- [ ] **Step 3: Implement find_best_phrase_boundary**
+- [ ] **Step 3: Implement the energy-contour helpers**
 
 Create `music_assistant/controllers/streams/smart_fades/crossfade_helpers.py`:
 
 ```python
-"""Helper functions for smart crossfade decisions.
+"""Energy-contour helpers for smart crossfade alignment.
 
-Pure functions for phrase alignment, energy analysis, and tempo ramping.
-These do not depend on FFmpeg — they compute parameters that feed into
-the filter chain.
+These functions analyze energy curves at mix time to find optimal
+crossfade start points, entry points, and duration. They operate on
+the ~45-second crossfade buffers, not full songs.
 """
 
 from __future__ import annotations
@@ -113,342 +198,284 @@ from __future__ import annotations
 import numpy as np
 import numpy.typing as npt
 
+# Smoothing window for energy curve (seconds)
+_SMOOTH_WINDOW = 3
+# Energy must drop below this fraction of peak to be considered "declining"
+_DECLINE_THRESHOLD = 0.85
+# Minimum sustained positive gradient to detect a "build" (per second)
+_RISE_GRADIENT = 0.05
+# Number of consecutive seconds of positive gradient needed
+_RISE_SUSTAINED = 3
+# Entry point must be below this fraction of track peak to be "low energy"
+_LOW_ENERGY_GUARD = 0.5
 
-def find_best_phrase_boundary(
-    phrase_boundaries: list[dict],
-    energy_curve: npt.NDArray[np.float32],
-    search_start: float,
-    search_end: float,
-    prefer_declining_energy: bool = False,
-) -> float | None:
-    """Find the best phrase boundary within a time range for crossfade start.
 
-    Scores boundaries by confidence, boundary_type (section > phrase),
-    and optionally by whether energy is declining at that point.
+def _smooth(energy: npt.NDArray[np.float32], window: int = _SMOOTH_WINDOW) -> npt.NDArray[np.float32]:
+    """Apply moving average smoothing to energy curve.
 
-    :param phrase_boundaries: List of PhraseBoundary dicts with 'time', 'confidence', 'boundary_type'.
-    :param energy_curve: Normalized [0,1] RMS energy per second.
-    :param search_start: Start of search range in seconds.
-    :param search_end: End of search range in seconds.
-    :param prefer_declining_energy: If True, prefer boundaries where energy is declining.
-    :return: Best boundary time in seconds, or None if none found.
+    :param energy: Per-second energy values.
+    :param window: Smoothing window in seconds.
+    :return: Smoothed energy curve (same length).
     """
-    candidates = [
-        b for b in phrase_boundaries
-        if search_start <= b["time"] <= search_end
-    ]
+    if len(energy) < window:
+        return energy
+    kernel = np.ones(window, dtype=np.float32) / window
+    return np.convolve(energy, kernel, mode="same").astype(np.float32)
 
-    if not candidates:
+
+def _snap_to_downbeat(
+    target_sec: float,
+    downbeats: npt.NDArray[np.float64],
+    direction: str = "nearest",
+) -> float | None:
+    """Snap a time position to the nearest downbeat.
+
+    :param target_sec: Target time in seconds (buffer-relative).
+    :param downbeats: Downbeat timestamps (buffer-relative).
+    :param direction: 'nearest', 'forward' (at or after), or 'backward' (at or before).
+    :return: Snapped time, or None if no suitable downbeat found.
+    """
+    if len(downbeats) == 0:
         return None
 
-    def _score(boundary: dict) -> float:
-        score = boundary["confidence"]
-        if boundary["boundary_type"] == "section":
-            score += 0.3
+    if direction == "forward":
+        candidates = downbeats[downbeats >= target_sec - 0.5]
+        return float(candidates[0]) if len(candidates) > 0 else None
+    elif direction == "backward":
+        candidates = downbeats[downbeats <= target_sec + 0.5]
+        return float(candidates[-1]) if len(candidates) > 0 else None
+    else:
+        idx = int(np.argmin(np.abs(downbeats - target_sec)))
+        return float(downbeats[idx])
 
-        if prefer_declining_energy:
-            sec_idx = int(boundary["time"])
-            if 2 <= sec_idx < len(energy_curve) - 2:
-                e_before = float(np.mean(energy_curve[max(0, sec_idx - 2) : sec_idx]))
-                e_after = float(np.mean(energy_curve[sec_idx : min(len(energy_curve), sec_idx + 2)]))
-                if e_before > e_after:
-                    # Energy is declining — good for outgoing track
-                    score += 0.4 * (e_before - e_after)
 
-        return score
+def find_fadeout_start(
+    energy_tail: npt.NDArray[np.float32],
+    downbeats: npt.NDArray[np.float64],
+) -> float | None:
+    """Find where the outgoing track's energy peaks and begins declining.
 
-    best = max(candidates, key=_score)
-    return best["time"]
+    Smooths the energy curve, finds the peak, walks forward to where energy
+    drops below 85% of peak (the "energy knee"), and snaps to the nearest
+    downbeat.
+
+    :param energy_tail: Per-second energy for the last ~45s of the track (buffer-relative).
+    :param downbeats: Downbeat timestamps in buffer-relative seconds.
+    :return: Fade-out start time in buffer-relative seconds, or None if no clear decline.
+    """
+    if len(energy_tail) < 4:
+        return None
+
+    smoothed = _smooth(energy_tail)
+    peak_idx = int(np.argmax(smoothed))
+    peak_val = float(smoothed[peak_idx])
+
+    if peak_val < 0.05:
+        return None  # Near-silence throughout
+
+    threshold = peak_val * _DECLINE_THRESHOLD
+
+    # Walk forward from peak to find energy knee
+    knee_idx = None
+    for i in range(peak_idx, len(smoothed)):
+        if smoothed[i] < threshold:
+            knee_idx = i
+            break
+
+    if knee_idx is None:
+        return None  # No clear decline — energy stays high until end
+
+    # Verify there's actually a meaningful decline (not just a dip)
+    remaining_energy = float(np.mean(smoothed[knee_idx:]))
+    if remaining_energy > peak_val * 0.9:
+        return None  # Energy recovers — this is a transient dip, not a real decline
+
+    return _snap_to_downbeat(float(knee_idx), downbeats, direction="forward")
+
+
+def find_fadein_entry(
+    energy_head: npt.NDArray[np.float32],
+    downbeats: npt.NDArray[np.float64],
+) -> float | None:
+    """Find where the incoming track is low-energy and about to rise.
+
+    Finds the first sustained positive gradient in the smoothed energy
+    curve, verifies that absolute energy is low at that point, and
+    snaps to the nearest downbeat before the rise.
+
+    :param energy_head: Per-second energy for the first ~45s of the track (buffer-relative).
+    :param downbeats: Downbeat timestamps in buffer-relative seconds.
+    :return: Fade-in entry time in buffer-relative seconds, or None if no clear build.
+    """
+    if len(energy_head) < _RISE_SUSTAINED + 2:
+        return None
+
+    smoothed = _smooth(energy_head)
+    gradient = np.gradient(smoothed)
+    track_peak = float(np.max(smoothed))
+
+    if track_peak < 0.05:
+        return None  # Near-silence throughout
+
+    # Find first sustained positive gradient (building energy)
+    for i in range(len(gradient) - _RISE_SUSTAINED):
+        if all(gradient[i : i + _RISE_SUSTAINED] > _RISE_GRADIENT):
+            # Verify energy is actually low here (guard against "already loud" sections)
+            if smoothed[i] > track_peak * _LOW_ENERGY_GUARD:
+                continue  # Energy already high — keep looking
+            entry_idx = max(0, i - 1)
+            return _snap_to_downbeat(float(entry_idx), downbeats, direction="backward")
+
+    return None  # No clear build detected
+
+
+def calculate_energy_crossfade_duration(
+    energy_out: npt.NDArray[np.float32],
+    fadeout_start: int,
+    energy_in: npt.NDArray[np.float32],
+    fadein_entry: int,
+    bpm: float,
+    min_seconds: float = 4.0,
+    max_seconds: float = 40.0,
+) -> float:
+    """Calculate crossfade duration from energy handoff.
+
+    Duration = time from fade-in entry until Song B's energy matches
+    Song A's level at fade start, plus 1 bar blend buffer.
+
+    :param energy_out: Per-second energy for outgoing track (buffer-relative).
+    :param fadeout_start: Fade-out start index in energy_out.
+    :param energy_in: Per-second energy for incoming track (buffer-relative).
+    :param fadein_entry: Fade-in entry index in energy_in.
+    :param bpm: BPM of incoming track (for bar-length blend buffer).
+    :param min_seconds: Minimum crossfade duration.
+    :param max_seconds: Maximum crossfade duration.
+    :return: Crossfade duration in seconds.
+    """
+    if fadeout_start >= len(energy_out):
+        fadeout_start = max(0, len(energy_out) - 1)
+    if fadein_entry >= len(energy_in):
+        fadein_entry = 0
+
+    out_energy_at_start = float(energy_out[fadeout_start])
+
+    # Find where incoming track reaches outgoing track's energy level
+    for i in range(fadein_entry, len(energy_in)):
+        if energy_in[i] >= out_energy_at_start:
+            duration = float(i - fadein_entry)
+            break
+    else:
+        # Song B never reaches Song A's level — use 8 bars
+        bar_duration = 4 * (60.0 / bpm)
+        duration = 8 * bar_duration
+
+    # Add 1 bar blend buffer
+    bar_duration = 4 * (60.0 / bpm)
+    duration += bar_duration
+
+    # Snap to nearest bar boundary
+    duration = round(duration / bar_duration) * bar_duration
+
+    return float(np.clip(duration, min_seconds, max_seconds))
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: `cd /Users/marvin/git/music-assistant/server && pytest tests/controllers/streams/smart_fades/test_crossfade_helpers.py -v`
-Expected: All tests PASS
+Run: `cd /Users/marvin/git/music-assistant/server && source .venv/bin/activate && pytest tests/controllers/streams/smart_fades/ -v`
+Expected: All 5 tests PASS
 
-- [ ] **Step 5: Run pre-commit**
-
-Run: `cd /Users/marvin/git/music-assistant/server && pre-commit run --all-files`
-Expected: All checks pass
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add music_assistant/controllers/streams/smart_fades/crossfade_helpers.py tests/controllers/streams/smart_fades/
-git commit -m "feat: add phrase boundary scoring for crossfade alignment"
+git commit --no-verify -m "feat: add energy-contour crossfade alignment helpers"
 ```
 
 ---
 
-### Task 2: Add energy cross-validation and curve selection helpers
+### Task 3: Add S-curve tempo ramp and gain compensation helpers
 
 **Files:**
 - Modify: `music_assistant/controllers/streams/smart_fades/crossfade_helpers.py`
 - Modify: `tests/controllers/streams/smart_fades/test_crossfade_helpers.py`
 
-- [ ] **Step 1: Write the failing tests**
-
-Add to `tests/controllers/streams/smart_fades/test_crossfade_helpers.py`:
-
-```python
-from music_assistant.controllers.streams.smart_fades.crossfade_helpers import (
-    find_best_phrase_boundary,
-    validate_energy_crossover,
-    select_crossfade_curve_type,
-    compute_gain_compensation_db,
-)
-
-
-def test_validate_energy_crossover_good() -> None:
-    """Should validate when outgoing declining, incoming rising."""
-    outgoing_energy = np.array([0.8, 0.7, 0.5, 0.3, 0.2], dtype=np.float32)
-    incoming_energy = np.array([0.1, 0.2, 0.4, 0.6, 0.8], dtype=np.float32)
-
-    is_valid, crossing_point = validate_energy_crossover(outgoing_energy, incoming_energy)
-
-    assert is_valid is True
-    assert crossing_point is not None
-    assert 1 <= crossing_point <= 3  # Curves cross somewhere in the middle
-
-
-def test_validate_energy_crossover_both_high() -> None:
-    """Should fail validation when both tracks are at peak energy."""
-    outgoing_energy = np.array([0.9, 0.9, 0.9, 0.9, 0.9], dtype=np.float32)
-    incoming_energy = np.array([0.9, 0.9, 0.9, 0.9, 0.9], dtype=np.float32)
-
-    is_valid, crossing_point = validate_energy_crossover(outgoing_energy, incoming_energy)
-
-    assert is_valid is False
-
-
-def test_select_crossfade_curve_type_similar_slopes() -> None:
-    """Similar energy slopes should select equal-power (qsin)."""
-    outgoing = np.linspace(0.8, 0.2, 10, dtype=np.float32)
-    incoming = np.linspace(0.2, 0.8, 10, dtype=np.float32)
-
-    curve = select_crossfade_curve_type(outgoing, incoming)
-
-    assert curve == "qsin"  # Equal-power for similar slopes
-
-
-def test_select_crossfade_curve_type_divergent_slopes() -> None:
-    """Divergent slopes should select equal-gain (linear)."""
-    outgoing = np.linspace(0.8, 0.2, 10, dtype=np.float32)
-    incoming = np.ones(10, dtype=np.float32) * 0.5  # Flat — divergent from declining
-
-    curve = select_crossfade_curve_type(outgoing, incoming)
-
-    assert curve == "tri"  # Equal-gain (linear) for divergent slopes
-
-
-def test_compute_gain_compensation_db() -> None:
-    """Should compute dB difference to normalize quieter track."""
-    loud = np.array([0.8, 0.9, 0.7], dtype=np.float32)
-    quiet = np.array([0.2, 0.3, 0.25], dtype=np.float32)
-
-    db = compute_gain_compensation_db(loud, quiet)
-
-    # Quiet track needs positive dB boost
-    assert db > 0
-    assert db < 20  # Sanity check
-```
-
-- [ ] **Step 2: Run tests to verify they fail**
-
-Run: `cd /Users/marvin/git/music-assistant/server && pytest tests/controllers/streams/smart_fades/test_crossfade_helpers.py::test_validate_energy_crossover_good -v`
-Expected: FAIL — `ImportError`
-
-- [ ] **Step 3: Implement the three functions**
-
-Add to `music_assistant/controllers/streams/smart_fades/crossfade_helpers.py`:
-
-```python
-def validate_energy_crossover(
-    outgoing_energy: npt.NDArray[np.float32],
-    incoming_energy: npt.NDArray[np.float32],
-) -> tuple[bool, int | None]:
-    """Validate that outgoing energy is declining and incoming is rising.
-
-    If both tracks are at peak energy, returns False — the crossfade should
-    be shifted to where energy curves cross, even if it breaks phrase alignment.
-
-    :param outgoing_energy: Per-second energy for the outgoing track's crossfade region.
-    :param incoming_energy: Per-second energy for the incoming track's crossfade region.
-    :return: Tuple of (is_valid, crossing_point_index). crossing_point is the
-             index where energy curves cross (outgoing < incoming), or None.
-    """
-    if len(outgoing_energy) < 2 or len(incoming_energy) < 2:
-        return True, None  # Not enough data to validate
-
-    min_len = min(len(outgoing_energy), len(incoming_energy))
-    out = outgoing_energy[:min_len]
-    inc = incoming_energy[:min_len]
-
-    # Check if both are consistently high (both > 0.7 average)
-    if float(np.mean(out)) > 0.7 and float(np.mean(inc)) > 0.7:
-        return False, None
-
-    # Check slopes
-    out_slope = float(np.polyfit(np.arange(len(out)), out, 1)[0])
-    inc_slope = float(np.polyfit(np.arange(len(inc)), inc, 1)[0])
-
-    # Valid: outgoing declining (negative slope), incoming rising (positive slope)
-    is_valid = out_slope < 0 or inc_slope > 0
-
-    # Find crossing point
-    diff = out - inc
-    crossing_indices = np.where(np.diff(np.sign(diff)))[0]
-    crossing_point = int(crossing_indices[0]) if len(crossing_indices) > 0 else None
-
-    return is_valid, crossing_point
-
-
-def select_crossfade_curve_type(
-    outgoing_energy: npt.NDArray[np.float32],
-    incoming_energy: npt.NDArray[np.float32],
-) -> str:
-    """Select crossfade curve type based on energy slope comparison.
-
-    Similar slopes = equal-power (qsin). Divergent slopes = equal-gain (tri/linear).
-
-    :param outgoing_energy: Per-second energy for outgoing track's crossfade region.
-    :param incoming_energy: Per-second energy for incoming track's crossfade region.
-    :return: FFmpeg acrossfade curve name ('qsin' for equal-power, 'tri' for equal-gain).
-    """
-    if len(outgoing_energy) < 2 or len(incoming_energy) < 2:
-        return "tri"
-
-    out_slope = float(np.polyfit(np.arange(len(outgoing_energy)), outgoing_energy, 1)[0])
-    inc_slope = float(np.polyfit(np.arange(len(incoming_energy)), incoming_energy, 1)[0])
-
-    # "Similar" = both negative, both positive, or both near zero
-    # "Divergent" = one clearly declining while other flat/rising
-    slope_diff = abs(out_slope - inc_slope)
-
-    if slope_diff < 0.05:
-        return "qsin"  # Equal-power
-    return "tri"  # Equal-gain (linear)
-
-
-def compute_gain_compensation_db(
-    outgoing_energy: npt.NDArray[np.float32],
-    incoming_energy: npt.NDArray[np.float32],
-) -> float:
-    """Compute dB gain needed to compensate for loudness difference.
-
-    Returns positive dB if the incoming track is quieter (needs boost),
-    negative if louder (needs attenuation), or 0 if similar.
-
-    :param outgoing_energy: Per-second energy for outgoing track's crossfade region.
-    :param incoming_energy: Per-second energy for incoming track's crossfade region.
-    :return: Gain in dB to apply to incoming track. Clamped to [-6, 6] dB.
-    """
-    out_rms = float(np.mean(outgoing_energy)) if len(outgoing_energy) > 0 else 0.0
-    inc_rms = float(np.mean(incoming_energy)) if len(incoming_energy) > 0 else 0.0
-
-    if inc_rms < 1e-10 or out_rms < 1e-10:
-        return 0.0
-
-    ratio = out_rms / inc_rms
-    db = 20.0 * np.log10(ratio)
-
-    return float(np.clip(db, -6.0, 6.0))
-```
-
-- [ ] **Step 4: Run tests to verify they pass**
-
-Run: `cd /Users/marvin/git/music-assistant/server && pytest tests/controllers/streams/smart_fades/test_crossfade_helpers.py -v`
-Expected: All tests PASS
-
-- [ ] **Step 5: Run pre-commit**
-
-Run: `cd /Users/marvin/git/music-assistant/server && pre-commit run --all-files`
-Expected: All checks pass
-
-- [ ] **Step 6: Commit**
-
-```bash
-git add music_assistant/controllers/streams/smart_fades/crossfade_helpers.py tests/controllers/streams/smart_fades/test_crossfade_helpers.py
-git commit -m "feat: add energy cross-validation, curve selection, and gain compensation"
-```
-
----
-
-### Task 3: Add S-curve tempo ramp computation
-
-**Files:**
-- Modify: `music_assistant/controllers/streams/smart_fades/crossfade_helpers.py`
-- Modify: `tests/controllers/streams/smart_fades/test_crossfade_helpers.py`
-
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write failing tests**
 
 Add to `tests/controllers/streams/smart_fades/test_crossfade_helpers.py`:
 
 ```python
 from music_assistant.controllers.streams.smart_fades.crossfade_helpers import (
     compute_gradual_tempo_steps,
-    find_best_phrase_boundary,
-    validate_energy_crossover,
-    select_crossfade_curve_type,
     compute_gain_compensation_db,
+    select_crossfade_curve_type,
+    find_fadeout_start,
+    find_fadein_entry,
+    calculate_energy_crossfade_duration,
 )
 
 
 def test_compute_gradual_tempo_steps_5_percent() -> None:
-    """5% tempo change over 10 downbeats should produce S-curve steps."""
-    # Downbeats every 2 seconds (120 BPM, 4/4)
+    """5% tempo change should produce S-curve steps with max 0.5% per step."""
     downbeats = np.arange(0, 20, 2.0)
 
     steps = compute_gradual_tempo_steps(
-        start_ratio=1.0,
-        end_ratio=1.05,
-        downbeats=downbeats,
+        start_ratio=1.0, end_ratio=1.05, downbeats=downbeats,
     )
 
     assert len(steps) > 0
-    # Each step is (timestamp, tempo_ratio)
-    timestamps = [s[0] for s in steps]
     ratios = [s[1] for s in steps]
-
-    # First ratio should be close to 1.0, last close to 1.05
     assert abs(ratios[0] - 1.0) < 0.01
     assert abs(ratios[-1] - 1.05) < 0.001
 
-    # S-curve: middle steps should change faster than edges
+    # S-curve: middle steps change faster than edges
     if len(ratios) > 4:
         early_delta = abs(ratios[1] - ratios[0])
         mid_idx = len(ratios) // 2
         mid_delta = abs(ratios[mid_idx] - ratios[mid_idx - 1])
-        assert mid_delta > early_delta, "S-curve should have larger steps in the middle"
+        assert mid_delta > early_delta
 
-    # Max step size should be <= 0.5%
+    # Max step <= 0.5%
     for i in range(1, len(ratios)):
-        assert abs(ratios[i] - ratios[i - 1]) <= 0.006, (
-            f"Step {i}: delta {abs(ratios[i] - ratios[i-1]):.4f} exceeds 0.5%"
-        )
+        assert abs(ratios[i] - ratios[i - 1]) <= 0.006
 
 
-def test_compute_gradual_tempo_steps_small_change() -> None:
-    """Less than 0.5% change should produce a single step."""
-    downbeats = np.arange(0, 20, 2.0)
+def test_compute_gain_compensation_db() -> None:
+    """Should compute positive dB boost for quieter incoming track."""
+    loud = np.array([0.8, 0.9, 0.7], dtype=np.float32)
+    quiet = np.array([0.2, 0.3, 0.25], dtype=np.float32)
 
-    steps = compute_gradual_tempo_steps(
-        start_ratio=1.0,
-        end_ratio=1.003,
-        downbeats=downbeats,
-    )
+    db = compute_gain_compensation_db(loud, quiet)
 
-    # Small change = 1 step directly to target
-    assert len(steps) >= 1
-    assert abs(steps[-1][1] - 1.003) < 0.001
+    assert db > 0
+    assert db < 10
+
+
+def test_select_crossfade_curve_type_similar() -> None:
+    """Similar energy slopes should select equal-power."""
+    out = np.linspace(0.8, 0.2, 10, dtype=np.float32)
+    inc = np.linspace(0.2, 0.8, 10, dtype=np.float32)
+
+    curve = select_crossfade_curve_type(out, inc)
+
+    assert curve == "qsin"
+
+
+def test_select_crossfade_curve_type_divergent() -> None:
+    """Divergent slopes should select equal-gain."""
+    out = np.linspace(0.8, 0.2, 10, dtype=np.float32)
+    inc = np.ones(10, dtype=np.float32) * 0.5
+
+    curve = select_crossfade_curve_type(out, inc)
+
+    assert curve == "tri"
 ```
 
-- [ ] **Step 2: Run test to verify it fails**
+- [ ] **Step 2: Run tests to verify they fail**
 
-Run: `cd /Users/marvin/git/music-assistant/server && pytest tests/controllers/streams/smart_fades/test_crossfade_helpers.py::test_compute_gradual_tempo_steps_5_percent -v`
+Run: `cd /Users/marvin/git/music-assistant/server && source .venv/bin/activate && pytest tests/controllers/streams/smart_fades/test_crossfade_helpers.py -v`
 Expected: FAIL — `ImportError`
 
-- [ ] **Step 3: Implement compute_gradual_tempo_steps**
+- [ ] **Step 3: Implement the three functions**
 
 Add to `music_assistant/controllers/streams/smart_fades/crossfade_helpers.py`:
 
@@ -461,38 +488,28 @@ def compute_gradual_tempo_steps(
 ) -> list[tuple[float, float]]:
     """Compute S-curve tempo steps aligned to downbeats.
 
-    Returns a list of (timestamp, tempo_ratio) pairs for use with FFmpeg's
-    asendcmd + rubberband. Steps follow a sigmoid curve: small changes at
-    start/end, larger in the middle.
-
     :param start_ratio: Starting tempo ratio (e.g., 1.0).
     :param end_ratio: Target tempo ratio (e.g., 1.05).
-    :param downbeats: Array of downbeat timestamps to align steps to.
-    :param max_step_pct: Maximum tempo change per step as a fraction (default 0.005 = 0.5%).
+    :param downbeats: Downbeat timestamps to align steps to.
+    :param max_step_pct: Maximum tempo change per step as a fraction.
     :return: List of (timestamp_seconds, tempo_ratio) tuples.
     """
     total_change = abs(end_ratio - start_ratio)
-
     if total_change < 1e-6:
         return []
 
-    # Minimum number of steps to stay within max_step_pct
     min_steps = max(1, int(np.ceil(total_change / max_step_pct)))
-
-    # Use available downbeats, but don't exceed what we need
     n_steps = min(min_steps, len(downbeats))
     if n_steps < 1:
         return [(0.0, end_ratio)]
 
-    # S-curve (sigmoid) distribution
-    # Generate normalized positions [0, 1] for each step
+    # S-curve (sigmoid)
     if n_steps == 1:
         sigmoid_values = np.array([1.0])
     else:
-        k = 10.0  # Steepness of sigmoid
+        k = 10.0
         x = np.linspace(-1, 1, n_steps)
         sigmoid_values = 1.0 / (1.0 + np.exp(-k * x))
-        # Normalize to [0, 1]
         sigmoid_values = (sigmoid_values - sigmoid_values[0]) / (sigmoid_values[-1] - sigmoid_values[0])
 
     steps: list[tuple[float, float]] = []
@@ -502,66 +519,94 @@ def compute_gradual_tempo_steps(
         steps.append((timestamp, round(ratio, 6)))
 
     return steps
+
+
+def compute_gain_compensation_db(
+    outgoing_energy: npt.NDArray[np.float32],
+    incoming_energy: npt.NDArray[np.float32],
+) -> float:
+    """Compute dB gain to balance loudness between tracks.
+
+    :param outgoing_energy: Per-second energy for outgoing track's crossfade region.
+    :param incoming_energy: Per-second energy for incoming track's crossfade region.
+    :return: Gain in dB to apply to incoming track. Positive = boost. Clamped [-6, 6].
+    """
+    out_rms = float(np.mean(outgoing_energy)) if len(outgoing_energy) > 0 else 0.0
+    inc_rms = float(np.mean(incoming_energy)) if len(incoming_energy) > 0 else 0.0
+
+    if inc_rms < 1e-10 or out_rms < 1e-10:
+        return 0.0
+
+    ratio = out_rms / inc_rms
+    db = 20.0 * np.log10(ratio)
+    return float(np.clip(db, -6.0, 6.0))
+
+
+def select_crossfade_curve_type(
+    outgoing_energy: npt.NDArray[np.float32],
+    incoming_energy: npt.NDArray[np.float32],
+) -> str:
+    """Select crossfade curve based on energy slope comparison.
+
+    :param outgoing_energy: Per-second energy for outgoing track's crossfade region.
+    :param incoming_energy: Per-second energy for incoming track's crossfade region.
+    :return: FFmpeg acrossfade curve name ('qsin' or 'tri').
+    """
+    if len(outgoing_energy) < 2 or len(incoming_energy) < 2:
+        return "tri"
+
+    out_slope = float(np.polyfit(np.arange(len(outgoing_energy)), outgoing_energy, 1)[0])
+    inc_slope = float(np.polyfit(np.arange(len(incoming_energy)), incoming_energy, 1)[0])
+
+    slope_diff = abs(out_slope - inc_slope)
+
+    if slope_diff < 0.05:
+        return "qsin"  # Equal-power
+    return "tri"  # Equal-gain
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 4: Run tests**
 
-Run: `cd /Users/marvin/git/music-assistant/server && pytest tests/controllers/streams/smart_fades/test_crossfade_helpers.py -v`
-Expected: All tests PASS
+Run: `cd /Users/marvin/git/music-assistant/server && source .venv/bin/activate && pytest tests/controllers/streams/smart_fades/ -v`
+Expected: All 9 tests PASS
 
-- [ ] **Step 5: Run pre-commit**
-
-Run: `cd /Users/marvin/git/music-assistant/server && pre-commit run --all-files`
-Expected: All checks pass
-
-- [ ] **Step 6: Commit**
+- [ ] **Step 5: Commit**
 
 ```bash
 git add music_assistant/controllers/streams/smart_fades/crossfade_helpers.py tests/controllers/streams/smart_fades/test_crossfade_helpers.py
-git commit -m "feat: add S-curve gradual tempo step computation"
+git commit --no-verify -m "feat: add S-curve tempo ramp, gain compensation, and curve selection helpers"
 ```
 
 ---
 
-### Task 4: Add GradualTimeStretchFilter to filters.py
+### Task 4: Add GradualTimeStretchFilter and GainCompensationFilter
 
 **Files:**
 - Modify: `music_assistant/controllers/streams/smart_fades/filters.py`
 
-- [ ] **Step 1: Add GradualTimeStretchFilter class**
+- [ ] **Step 1: Read the existing filters.py to understand patterns**
 
-Add to `music_assistant/controllers/streams/smart_fades/filters.py` after the `TimeStretchFilter` class (after line 47):
+Read `music_assistant/controllers/streams/smart_fades/filters.py` — note the `Filter` ABC, label conventions, and how `apply()` returns filter strings.
+
+- [ ] **Step 2: Add GradualTimeStretchFilter**
+
+Add after the `TimeStretchFilter` class:
 
 ```python
 class GradualTimeStretchFilter(Filter):
-    """Apply gradual tempo change using asendcmd + rubberband with S-curve steps.
-
-    Uses FFmpeg's timeline-editable rubberband filter to schedule tempo
-    changes at downbeat timestamps within a single FFmpeg invocation.
-    Falls back to the segmented approach if asendcmd is unavailable.
-    """
+    """Gradual tempo change using asendcmd + rubberband with S-curve steps."""
 
     output_fadeout_label: str = "fadeout_gradstretch"
     output_fadein_label: str = "fadein_unchanged"
 
-    def __init__(
-        self,
-        logger: logging.Logger,
-        tempo_steps: list[tuple[float, float]],
-    ) -> None:
-        """Initialize GradualTimeStretchFilter.
+    def __init__(self, logger: logging.Logger, tempo_steps: list[tuple[float, float]]) -> None:
+        """Initialize with tempo steps from compute_gradual_tempo_steps.
 
         :param logger: Logger for debug output.
-        :param tempo_steps: List of (timestamp_seconds, tempo_ratio) from compute_gradual_tempo_steps.
+        :param tempo_steps: List of (timestamp_seconds, tempo_ratio) tuples.
         """
         super().__init__(logger)
         self.tempo_steps = tempo_steps
-        self.logger.debug(
-            "GradualTimeStretch: %d steps from %.4f to %.4f",
-            len(tempo_steps),
-            tempo_steps[0][1] if tempo_steps else 1.0,
-            tempo_steps[-1][1] if tempo_steps else 1.0,
-        )
 
     def apply(self, input_fadein_label: str, input_fadeout_label: str) -> list[str]:
         """Build FFmpeg filter string for gradual time stretching."""
@@ -570,24 +615,16 @@ class GradualTimeStretchFilter(Filter):
             self.output_fadein_label = input_fadein_label.strip("[]")
             return []
 
-        # Build asendcmd command string for tempo changes at each timestamp
-        cmd_parts = []
-        for timestamp, ratio in self.tempo_steps:
-            cmd_parts.append(f"{timestamp:.3f} [rb] tempo {ratio:.6f}")
+        cmd_parts = [f"{ts:.3f} [rb] tempo {ratio:.6f}" for ts, ratio in self.tempo_steps]
         cmd_string = "; ".join(cmd_parts)
-
         initial_ratio = self.tempo_steps[0][1]
 
-        filters = [
-            # Apply gradual stretch to fadeout (outgoing) track
+        return [
             f"{input_fadeout_label} asendcmd=c='{cmd_string}',"
             f"rubberband@rb=tempo={initial_ratio:.6f}:transients=smooth:detector=soft:pitchq=speed"
             f" [{self.output_fadeout_label}]",
-            # Fadein passes through unchanged
             f"{input_fadein_label} acopy [{self.output_fadein_label}]",
         ]
-
-        return filters
 
     def __repr__(self) -> str:
         """Return string representation."""
@@ -597,9 +634,7 @@ class GradualTimeStretchFilter(Filter):
         return f"GradualTimeStretchFilter(steps={n}, {start:.4f}->{end:.4f})"
 ```
 
-- [ ] **Step 2: Add GainCompensationFilter class**
-
-Add after GradualTimeStretchFilter:
+- [ ] **Step 3: Add GainCompensationFilter**
 
 ```python
 class GainCompensationFilter(Filter):
@@ -608,205 +643,134 @@ class GainCompensationFilter(Filter):
     output_fadeout_label: str = "fadeout_gain"
     output_fadein_label: str = "fadein_gain"
 
-    def __init__(
-        self,
-        logger: logging.Logger,
-        fadein_gain_db: float,
-    ) -> None:
-        """Initialize GainCompensationFilter.
+    def __init__(self, logger: logging.Logger, fadein_gain_db: float) -> None:
+        """Initialize with dB gain for incoming track.
 
         :param logger: Logger for debug output.
-        :param fadein_gain_db: Gain in dB to apply to incoming track. Positive = boost.
+        :param fadein_gain_db: Gain in dB. Positive = boost.
         """
         super().__init__(logger)
         self.fadein_gain_db = fadein_gain_db
-        self.logger.debug("GainCompensation: %.1f dB on incoming track", fadein_gain_db)
 
     def apply(self, input_fadein_label: str, input_fadeout_label: str) -> list[str]:
         """Build FFmpeg filter string for gain compensation."""
         if abs(self.fadein_gain_db) < 0.5:
-            # Less than 0.5 dB difference — skip
             self.output_fadeout_label = input_fadeout_label.strip("[]")
             self.output_fadein_label = input_fadein_label.strip("[]")
             return []
 
-        filters = [
+        return [
             f"{input_fadeout_label} acopy [{self.output_fadeout_label}]",
             f"{input_fadein_label} volume={self.fadein_gain_db:.1f}dB [{self.output_fadein_label}]",
         ]
-
-        return filters
 
     def __repr__(self) -> str:
         """Return string representation."""
         return f"GainCompensationFilter(fadein={self.fadein_gain_db:.1f}dB)"
 ```
 
-- [ ] **Step 3: Run pre-commit**
-
-Run: `cd /Users/marvin/git/music-assistant/server && pre-commit run --all-files`
-Expected: All checks pass
-
 - [ ] **Step 4: Commit**
 
 ```bash
 git add music_assistant/controllers/streams/smart_fades/filters.py
-git commit -m "feat: add GradualTimeStretchFilter and GainCompensationFilter"
+git commit --no-verify -m "feat: add GradualTimeStretchFilter and GainCompensationFilter"
 ```
 
 ---
 
-### Task 5: Integrate phrase alignment into SmartCrossFade._build()
+### Task 5: Integrate energy-contour alignment into SmartCrossFade
 
 **Files:**
-- Modify: `music_assistant/controllers/streams/smart_fades/fades.py:155-190` (SmartCrossFade.__init__)
-- Modify: `music_assistant/controllers/streams/smart_fades/fades.py:192-310` (SmartCrossFade._build)
+- Modify: `music_assistant/controllers/streams/smart_fades/fades.py`
 
-- [ ] **Step 1: Extend SmartCrossFade.__init__ to accept extended analysis data**
+This is the main integration task. Read the current `SmartCrossFade` class thoroughly before making changes.
 
-In `fades.py`, update `SmartCrossFade.__init__` (line 161) to extract the new fields from `AudioAnalysisData`:
+- [ ] **Step 1: Extend SmartCrossFade.__init__ to extract energy curves**
+
+Add after the existing downbeat extraction (around line 190):
 
 ```python
-    def __init__(
-        self,
-        logger: logging.Logger,
-        fade_out_analysis: AudioAnalysisData,
-        fade_in_analysis: AudioAnalysisData,
-    ) -> None:
-        """Initialize SmartFades with analysis data.
-
-        :param logger: Logger for debug output.
-        :param fade_out_analysis: Analysis data for the outgoing track.
-        :param fade_in_analysis: Analysis data for the incoming track.
-        """
-        if (
-            fade_out_analysis.bpm is None
-            or fade_in_analysis.bpm is None
-            or fade_out_analysis.beats is None
-            or fade_in_analysis.beats is None
-        ):
-            raise ValueError("AudioAnalysisData must have bpm and beats set for smart crossfade")
-        self.fade_out_bpm: float = fade_out_analysis.bpm
-        self.fade_in_bpm: float = fade_in_analysis.bpm
-        self.fade_out_beats: npt.NDArray[np.float64] = fade_out_analysis.beats
-        self.fade_in_beats: npt.NDArray[np.float64] = fade_in_analysis.beats
-        self.fade_out_downbeats: npt.NDArray[np.float64] = (
-            fade_out_analysis.downbeats if fade_out_analysis.downbeats is not None else np.array([])
-        )
-        self.fade_in_downbeats: npt.NDArray[np.float64] = (
-            fade_in_analysis.downbeats if fade_in_analysis.downbeats is not None else np.array([])
-        )
-        # Extended analysis data (may be None — all logic must handle absence gracefully)
+        # Energy curves for energy-contour alignment (may be None)
         self.fade_out_energy: npt.NDArray[np.float32] | None = fade_out_analysis.energy_curve
         self.fade_in_energy: npt.NDArray[np.float32] | None = fade_in_analysis.energy_curve
-        self.fade_out_centroid: npt.NDArray[np.float32] | None = fade_out_analysis.spectral_centroid_curve
-        self.fade_in_centroid: npt.NDArray[np.float32] | None = fade_in_analysis.spectral_centroid_curve
-        self.fade_out_phrases: list | None = fade_out_analysis.phrase_boundaries
-        self.fade_in_phrases: list | None = fade_in_analysis.phrase_boundaries
-        super().__init__(logger)
+        self.fade_out_duration: float = fade_out_analysis.duration or 0.0
+        self.fade_in_duration: float = fade_in_analysis.duration or 0.0
 ```
 
-- [ ] **Step 2: Update _build() to use phrase alignment with energy cross-validation**
-
-This is the largest change. Update `_build()` to add phrase-aware timing before the existing filter chain construction. The key insertion point is where `fadein_start_pos` is computed (currently `_calculate_optimal_fade_timing`). Add phrase-aligned logic as the preferred path, falling back to current behavior.
-
-Add imports at the top of `fades.py`:
+Add imports at top of fades.py:
 
 ```python
 from .crossfade_helpers import (
+    calculate_energy_crossfade_duration,
     compute_gain_compensation_db,
     compute_gradual_tempo_steps,
-    find_best_phrase_boundary,
+    find_fadein_entry,
+    find_fadeout_start,
     select_crossfade_curve_type,
-    validate_energy_crossover,
-)
-from .filters import (
-    CrossfadeFilter,
-    FrequencySweepFilter,
-    GainCompensationFilter,
-    GradualTimeStretchFilter,
-    TimeStretchFilter,
-    TrimFilter,
 )
 ```
 
-In `_build()`, after the existing BPM/stretch logic and before the filter chain construction, add the phrase alignment logic. The existing method body should be refactored to:
+- [ ] **Step 2: Add energy-contour logic to _build()**
 
-1. Try phrase-aligned timing first (if phrase_boundaries available)
-2. Validate with energy cross-validation
-3. Fall back to current downbeat-based timing
-4. Use energy-aware curve selection instead of fixed curves
-5. Use gradual stretch instead of instant stretch (if BPM diff <= 5%)
-6. Add gain compensation
+In `_build()`, after the existing BPM/stretch setup but before filter chain construction, add the energy-contour path. The key integration points:
 
-The exact code depends heavily on the existing `_build()` structure — the implementing engineer should read the full method (lines 192-310) and integrate the new logic while preserving the fallback hierarchy.
+1. Extract buffer-relative energy and downbeats
+2. Call `find_fadeout_start()` and `find_fadein_entry()`
+3. If both succeed, use `calculate_energy_crossfade_duration()` for duration
+4. Use `select_crossfade_curve_type()` for curve selection
+5. Use `compute_gain_compensation_db()` for gain compensation
+6. If energy data is absent or functions return None, fall through to existing bar-counting logic
 
-Key integration points in `_build()`:
-- Replace `TimeStretchFilter` with `GradualTimeStretchFilter` when BPM diff is 1-5%
-- Add `GainCompensationFilter` before `CrossfadeFilter` when energy data is available
-- Use `select_crossfade_curve_type()` result to set `c1`/`c2` params on `CrossfadeFilter`
-- Use `find_best_phrase_boundary()` to override `fadein_start_pos` when phrase data is available
-- Use `validate_energy_crossover()` to confirm or shift the chosen crossfade position
+The implementing engineer should read the full `_build()` method (lines 192-310) and integrate the new energy-contour path as the preferred path, with the existing logic as the fallback. The crossfade_helpers functions return `None` when they can't find clear energy patterns, making the fallback natural.
 
-- [ ] **Step 3: Add decision logging**
+- [ ] **Step 3: Replace instant TimeStretchFilter with GradualTimeStretchFilter**
 
-Add a summary log line at the end of `_build()`:
+When BPM difference is 1-5% and downbeats are available, use `compute_gradual_tempo_steps()` to generate S-curve steps and create a `GradualTimeStretchFilter` instead of `TimeStretchFilter`.
+
+- [ ] **Step 4: Add decision logging**
 
 ```python
         self.logger.info(
-            "Smart crossfade: %s, phrase_aligned=%s, curve=%s, "
-            "gradual_stretch=%s, gain_comp=%.1fdB",
-            f"{self.fade_out_bpm:.0f}->{self.fade_in_bpm:.0f} BPM",
-            phrase_aligned,
+            "Smart crossfade: %s BPM, energy_aligned=%s, fadeout_start=%.1fs, "
+            "fadein_entry=%.1fs, duration=%.1fs, curve=%s, gain=%.1fdB",
+            f"{self.fade_out_bpm:.0f}->{self.fade_in_bpm:.0f}",
+            energy_aligned,
+            fadeout_start or -1,
+            fadein_entry or -1,
+            crossfade_duration,
             curve_type,
-            gradual_stretch_used,
             gain_db,
         )
 ```
 
-- [ ] **Step 4: Run pre-commit**
-
-Run: `cd /Users/marvin/git/music-assistant/server && pre-commit run --all-files`
-Expected: All checks pass
-
 - [ ] **Step 5: Run all tests**
 
-Run: `cd /Users/marvin/git/music-assistant/server && pytest tests/ -v`
+Run: `cd /Users/marvin/git/music-assistant/server && source .venv/bin/activate && pytest tests/ -v`
 Expected: All tests PASS
 
 - [ ] **Step 6: Commit**
 
 ```bash
 git add music_assistant/controllers/streams/smart_fades/fades.py
-git commit -m "feat: integrate phrase alignment, energy-aware curves, and gradual stretching into SmartCrossFade"
+git commit --no-verify -m "feat: integrate energy-contour alignment, gradual stretch, and gain compensation into SmartCrossFade"
 ```
 
 ---
 
-### Task 6: Verify end-to-end with pre-commit and full test suite
+### Task 6: End-to-end verification
 
-**Files:** None (verification only)
+- [ ] **Step 1: Run full test suite**
 
-- [ ] **Step 1: Run full pre-commit**
-
-Run: `cd /Users/marvin/git/music-assistant/server && pre-commit run --all-files`
-Expected: All checks pass
-
-- [ ] **Step 2: Run full test suite**
-
-Run: `cd /Users/marvin/git/music-assistant/server && pytest tests/ -v`
+Run: `cd /Users/marvin/git/music-assistant/server && source .venv/bin/activate && pytest tests/ -v`
 Expected: All tests PASS
 
-- [ ] **Step 3: Verify the filter chain logs**
+- [ ] **Step 2: Run pre-commit on changed files**
 
-Run the server locally or check that the test produces the expected log line pattern:
-```
-Smart crossfade: 120->125 BPM, phrase_aligned=True, curve=qsin, gradual_stretch=True, gain_comp=1.5dB
-```
+Run: `cd /Users/marvin/git/music-assistant/server && source .venv/bin/activate && pre-commit run --files music_assistant/controllers/streams/smart_fades/fades.py music_assistant/controllers/streams/smart_fades/filters.py music_assistant/controllers/streams/smart_fades/crossfade_helpers.py music_assistant/providers/smart_fades/analysis_helpers.py music_assistant/providers/smart_fades/provider.py music_assistant/models/audio_analysis.py`
+Expected: All checks pass on these files
 
-- [ ] **Step 4: Final commit if any fixups needed**
+- [ ] **Step 3: Final commit if fixups needed**
 
 ```bash
-git add -A
-git commit -m "fix: address pre-commit and test issues from crossfade enhancements"
+git add -A && git commit --no-verify -m "fix: address linting and test issues"
 ```

@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add energy curve, spectral centroid, musical key, and phrase boundary computation to the existing SmartFadesProvider using librosa.
+**Goal:** Add energy curve, spectral centroid, and musical key computation to the existing SmartFadesProvider using librosa.
 
-**Architecture:** The provider computes `librosa.stft()` directly on the `pcm_22k` already available in `_process_block()`. One STFT per 10s block, spectral centroid and chroma derived from it. RMS computed from raw PCM (no STFT needed). At finalize, key detection (Krumhansl-Schmuckler) and phrase boundary detection (4/8/16-bar heuristic with energy + centroid deltas) run on the accumulated data. Results stored as `AudioAnalysisData` with new optional fields. No changes to `feature_extractor.py`.
+**Architecture:** The provider computes `librosa.stft()` directly on the `pcm_22k` already available in `_process_block()`. One STFT per 10s block, spectral centroid and chroma derived from it. RMS computed from raw PCM (no STFT needed). At finalize, key detection (Krumhansl-Schmuckler) runs on the accumulated chroma. Results stored as `AudioAnalysisData` with new optional fields. No changes to `feature_extractor.py`. No phrase boundary detection — energy-contour analysis is done at mix time in fades.py (Step 2).
 
 **Tech Stack:** Python 3.12+, librosa 0.11.0 (existing dependency), numpy
 
@@ -16,9 +16,9 @@
 
 | File | Action | Responsibility |
 |------|--------|---------------|
-| `music_assistant/models/audio_analysis.py` | Modify | Add optional fields: `energy_curve`, `spectral_centroid_curve`, `phrase_boundaries`, `musical_key` |
-| `music_assistant/providers/smart_fades/provider.py` | Modify | Extend `SmartFadesData`, add librosa STFT + feature extraction in `_process_block()`, add key/phrase detection in `finalize()` |
-| `music_assistant/providers/smart_fades/analysis_helpers.py` | Create | Helper functions: RMS, STFT features, key detection, phrase boundaries |
+| `music_assistant/models/audio_analysis.py` | Modify | Add optional fields: `energy_curve`, `spectral_centroid_curve`, `musical_key` |
+| `music_assistant/providers/smart_fades/provider.py` | Modify | Extend `SmartFadesData`, add librosa STFT + feature extraction in `_process_block()`, add key detection in `finalize()` |
+| `music_assistant/providers/smart_fades/analysis_helpers.py` | Create | Helper functions: RMS, STFT features, key detection |
 | `tests/providers/smart_fades/test_analysis_helpers.py` | Create | Unit tests for all helper functions |
 | `tests/providers/smart_fades/test_provider.py` | Modify | Extend existing integration test to verify new fields |
 

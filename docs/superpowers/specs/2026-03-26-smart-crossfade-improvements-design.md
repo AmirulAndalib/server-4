@@ -24,12 +24,12 @@ The system currently:
 - Time-stretches the outgoing track to match incoming BPM (instant jump)
 - Uses FFmpeg filter chain: `TimeStretchFilter` (rubberband) -> `TrimFilter` (atrim) -> `FrequencySweepFilter` (lowpass on outgoing) -> `FrequencySweepFilter` (highpass on incoming) -> `CrossfadeFilter` (acrossfade)
 - Aligns crossfades to downbeats when possible
-- Has `energy_curve` (per-second RMS), `spectral_centroid_curve`, `phrase_boundaries`, and `musical_key` available in `ExtendedSmartFadesAnalysis` but NOT used in crossfade logic
+- Has `energy_curve` (per-second RMS), `spectral_centroid_curve`, and `musical_key` available in `AudioAnalysisData` but NOT used in crossfade logic
 - `SmartCrossFade` in `fades.py` only receives `AudioAnalysisData` (bpm, beats, downbeats, duration)
 
 ## Problems
 
-1. **No phrase awareness:** Crossfades can start mid-phrase (e.g., overlaying beat 1 of Song B with bar 5 of an 8-bar phrase in Song A). Almost all popular music uses 4-bar or 8-bar phrases — starting mid-phrase is jarring even if beats are aligned.
+1. **No energy awareness:** Crossfades ignore energy contours, so they can overlay a loud chorus of Song A with the loud drop of Song B, creating a loudness clash. The crossfade should align Song A's declining energy with Song B's rising energy.
 
 2. **Instant time stretching:** BPM matching jumps instantly (e.g., 1.0x to 1.05x). Even 2-3% instant changes are audible on sustained notes, vocals, and pads. Real DJs nudge pitch gradually over 16-32 bars.
 
@@ -42,8 +42,7 @@ The system currently:
 **Required for all 6 improvements.**
 
 Add optional fields to `AudioAnalysisData`:
-- `phrase_boundaries: list[float]` — phrase/section boundary timestamps in seconds
-- `energy_curve: list[float]` — per-second RMS energy values
+- `energy_curve: list[float]` — per-second RMS energy values (normalized 0-1)
 - `spectral_centroid_curve: list[float]` — per-second spectral brightness values
 - `musical_key: MusicalKey | None` — root note + mode + confidence
 
@@ -57,41 +56,52 @@ The existing `update()` merge pattern (latest-write-wins) handles new optional f
 
 ---
 
-### Priority 1: Phrase-Aligned Crossfade Timing
+### Priority 1: Energy-Contour Crossfade Alignment
 
-**Musical problem:** A crossfade starting at bar 5 of an 8-bar phrase means Song A is mid-phrase while Song B starts a new phrase. This sounds wrong even when beats are perfectly aligned. Apple Music's auto-DJ handles this by aligning energy drops in outros with energy peaks in intros, naturally aligning phrases.
+**Musical problem:** The current crossfade logic uses only bar counts and downbeat positions to decide when and where to fade. It doesn't consider energy — so it can overlay a loud chorus of Song A with the loud drop of Song B, creating a loudness clash. The goal is to align Song A's declining energy with Song B's rising energy for a natural "energy handoff."
 
-**Musical rules:**
-- Crossfade should START on a phrase boundary of the outgoing track (last phrase of the outro — where `energy_curve` starts consistently dropping)
-- Crossfade should START on beat 1, bar 1 of a phrase in the incoming track (where energy is still low/building)
-- Duration should be a multiple of 4 bars
-- Outgoing energy should be declining while incoming is rising during overlap
+**Approach: Energy-contour analysis at mix time (in fades.py).**
+No pre-computed phrase boundaries needed. The crossfade code directly analyzes `energy_curve` from both tracks at mix time, because the optimal crossfade point depends on the *pairing* of two specific tracks, not on either track in isolation.
 
-**Energy cross-validation (critical refinement):**
-After selecting a phrase-aligned crossfade start point, validate it by checking:
-- Outgoing track's energy is declining in the overlap region
-- Incoming track's energy is rising in the overlap region
-- If both tracks are at peak energy at the phrase-aligned point, shift the crossfade start to where the energy curves actually cross, even if it breaks phrase alignment
-- Rationale: A phrase-aligned crossfade where both tracks are blasting is worse than a slightly off-phrase crossfade during a natural energy transition
+**Algorithm:**
 
-**Implementation approach:**
-- Python logic changes in `SmartCrossFade._build()` and `_calculate_optimal_fade_timing()`
-- No new FFmpeg filters
-- New method in `_build()`: find the last phrase boundary before energy starts declining in outgoing track (numpy slope computation on `energy_curve`)
-- Find first phrase boundary in incoming track where energy is low/rising
-- Use these as crossfade start points, with existing downbeat/beat fallback hierarchy underneath
-- Duration constraint to 4-bar multiples: already using bar-based calculations
-- Energy cross-validation: `np.argmin(np.abs(outgoing_energy - incoming_energy))` in the candidate region to find crossing point
+1. **Find Song A's fade-out start (energy peak → decline knee):**
+   - Extract last ~45s of Song A's energy_curve
+   - Smooth with 3-second moving average to ignore transient hits
+   - Find the peak energy in the smoothed curve
+   - Walk forward from peak to find where energy drops below 85% of peak (the "energy knee")
+   - Snap to nearest downbeat at or after the knee
+   - Fallback: if no clear decline, use ~8 bars before end (current behavior)
+
+2. **Find Song B's fade-in entry (low energy, about to rise):**
+   - Extract first ~45s of Song B's energy_curve
+   - Smooth with 3-second moving average
+   - Find first sustained positive gradient (energy increasing > 0.05/s over 3 consecutive seconds)
+   - Verify absolute energy at entry point is below 50% of Song B's peak (guard against "already loud" intros)
+   - Snap to nearest downbeat before the rise begins
+   - Fallback: first downbeat (current behavior)
+
+3. **Calculate crossfade duration from energy handoff:**
+   - Duration = time from fade-in entry until Song B's energy matches Song A's level at fade start + 1 bar blend buffer
+   - Clamp to [4 beats, 45 seconds], snap to bar boundaries
+   - Fallback: 8 bars (current behavior)
+
+4. **Energy-aware curve selection:**
+   - Compare avg energy of both tracks in overlap region
+   - Similar energy with similar slopes → equal-power (qsin)
+   - Divergent slopes (one declining, one rising) → equal-gain (linear)
+   - Song B much louder → fade A out faster (exponential), bring B in gently (logarithmic)
+
+**Coordinate system fix:** The energy_curve covers the full song (1 value/second) but the PCM buffers are the last/first ~45 seconds. Fade-out energy: `energy_curve[-45:]`. Fade-in energy: `energy_curve[:45]`. Fade-out downbeats must be shifted to buffer-relative coordinates: `downbeats[mask] - outro_start`.
 
 **Fallback hierarchy (graceful degradation):**
-1. **Best:** Align to phrase boundaries on both tracks (with energy cross-validation)
-2. **Good:** Align to downbeats at 4-bar multiples
-3. **Acceptable:** Align to any downbeat
-4. **Last resort:** Current behavior
+1. **Best:** Energy-contour aligned with downbeat snapping
+2. **Good:** Current downbeat-based approach (when energy_curve is absent)
+3. **Last resort:** Current bar-counting behavior
 
 **Effort:** Medium
-**CPU impact:** None (numpy operations on small arrays)
-**Files:** `fades.py`, `audio_analysis.py`
+**CPU impact:** None (numpy operations on ~45 values)
+**Files:** `fades.py`
 
 ---
 
@@ -314,7 +324,7 @@ All improvements check for field presence and fall back to current behavior when
 | Priority | New FFmpeg Concepts | New Python Logic | New Classes |
 |----------|-------------------|-----------------|-------------|
 | Prereq | None | Optional fields on AudioAnalysisData | None |
-| 1 | None | Phrase selection + energy validation | None |
+| 1 | None | Energy-contour analysis at mix time | None |
 | 2 | Richer volume expressions | Energy slope analysis, gain computation | None |
 | 3 | `asendcmd` for tempo scheduling | S-curve sigmoid computation | GradualTimeStretchFilter |
 | 4 | `concat`, `aevalsrc` | BPM gap detection, silence scaling | EnergyFadeCrossFade |
@@ -331,7 +341,7 @@ All improvements check for field presence and fall back to current behavior when
 GradualTimeStretchFilter (asendcmd + rubberband, S-curve steps)
        │
        v
-TrimFilter (phrase-aligned start position)
+TrimFilter (energy-contour-aligned start position)
        │
        v
 FrequencySweepFilter (lowpass on outgoing, spectral-centroid-derived crossover, energy-aware curve)
@@ -459,57 +469,6 @@ mean_chroma = trimmed.mean(axis=0)
 
 ---
 
-### Feature 4: `phrase_boundaries` — Structural Boundary Detection
-
-**Approach:** Heuristic detection from downbeats + energy curve + spectral centroid at finalize. No separate ML model.
-
-**Algorithm:** Check 4-bar, 8-bar, and 16-bar downbeat boundaries. Score each by combined energy delta + spectral centroid delta. Classify as "section" (major structural change) or "phrase" (minor structural division).
-
-```python
-def _detect_phrase_boundaries(
-    downbeats: np.ndarray,
-    energy_curve: np.ndarray,
-    centroid_curve: np.ndarray,
-    bpm: float,
-) -> list[PhraseBoundary]:
-    for i, db_time in enumerate(downbeats):
-        is_16bar = (i % 16 == 0)
-        is_8bar = (i % 8 == 0)
-        is_4bar = (i % 4 == 0)
-        if not is_4bar:
-            continue
-
-        # Energy delta (2s window before/after)
-        energy_delta = abs(e_after - e_before) / max(e_before, 1e-10)
-
-        # Spectral centroid delta (catches timbral changes energy misses)
-        centroid_delta = abs(c_after - c_before) / max(c_before, 1e-10)
-
-        # Combined score: weighted sum
-        combined_score = 0.6 * energy_delta + 0.4 * centroid_delta
-
-        # Lower threshold for longer bar groupings (stronger prior)
-        # 16-bar: > 0.15 (almost certainly real if any change detected)
-        # 8-bar: > 0.25 (section if > 0.5, phrase otherwise)
-        # 4-bar: > 0.4 (only if very significant change)
-```
-
-**Why this over Foote novelty / self-similarity matrix:**
-- v1 simplicity — covers the crossfade use case well for pop/rock/electronic/hip-hop
-- Zero memory overhead (no stored mel vectors needed)
-- Foote novelty can be added in v2 if heuristic proves insufficient
-- Energy + centroid deltas catch both loudness transitions AND timbral changes (e.g., synth pad entering, filter sweep)
-
-**16-bar detection:** Critical for EDM. At 128 BPM in 4/4, 16 bars = 32 seconds. Missing these = missing drops, breakdowns, builds.
-
-**Spectral centroid delta:** Catches transitions that energy alone misses — a chorus and verse can have similar energy but very different spectral content.
-
-- **Compute phase:** N/A — computed at finalize from already-available data
-- **CPU at finalize:** ~0.1ms (small array operations)
-- **Accuracy:** Sufficient for crossfade phrase alignment. Within 1-2 bars. Quantized to nearest downbeat.
-
----
-
 ### Audio Analysis Data Flow
 
 ```
@@ -538,8 +497,6 @@ At finalize:
   |
   +---> key detection from trimmed chroma (Krumhansl-Schmuckler) [NEW] -> MusicalKey
   |
-  +---> phrase boundaries from downbeats + energy + centroid [NEW]
-  |
   +---> store AudioAnalysisData with new fields [MODIFIED]
 ```
 
@@ -554,13 +511,12 @@ At finalize:
 
 2. **`music_assistant/providers/smart_fades/feature_extractor.py`** — NO CHANGES
 
-3. **`music_assistant/models/audio_analysis.py`** — Add optional fields to `AudioAnalysisData`: `phrase_boundaries`, `energy_curve`, `spectral_centroid_curve`, `musical_key`
+3. **`music_assistant/models/audio_analysis.py`** — Add optional fields to `AudioAnalysisData`: `energy_curve`, `spectral_centroid_curve`, `musical_key`
 
 4. **New file: `music_assistant/providers/smart_fades/analysis_helpers.py`** — Helper functions:
    - `compute_rms_per_second(pcm, sr) -> np.ndarray`
    - `compute_stft_features(pcm, sr) -> tuple[np.ndarray, np.ndarray]` — returns (centroid_per_sec, chroma_per_sec) from single STFT
    - `detect_key(chroma_per_second, duration) -> dict`
-   - `detect_phrase_boundaries(downbeats, energy, centroid, bpm) -> list[dict]`
 
 ### CPU Budget Summary
 
@@ -570,9 +526,8 @@ At finalize:
 | RMS energy (numpy, no STFT) | ~0.1ms | ~0.01ms (normalize) | ~4 bytes/sec |
 | Spectral centroid (from S) | ~0.5ms | — | ~4 bytes/sec |
 | Chroma (from S) | ~0.5ms | — | ~48 bytes/sec |
-| Phrase boundaries | — | ~0.1ms | — |
 | Key detection (K-S) | — | ~0.1ms | — |
-| **Total additional** | **~6.1ms** | **~0.21ms** | **~56 bytes/sec** |
+| **Total additional** | **~6.1ms** | **~0.11ms** | **~56 bytes/sec** |
 
 **Comparison:** Existing Beat This mel extraction costs ~50-100ms per 10s block. Additional analysis adds ~6-12% overhead. One `librosa.stft()` per block, spectral centroid and chroma both derived from the same STFT matrix.
 
