@@ -97,6 +97,10 @@ def find_fadeout_start(
     if knee_idx is None:
         return None  # No clear decline — energy stays high until end
 
+    # Ignore edge effects from smoothing (knee in last few samples of a flat signal)
+    if knee_idx >= len(smoothed) - _SMOOTH_WINDOW:
+        return None
+
     # Verify there's actually a meaningful decline (not just a dip)
     remaining_energy = float(np.mean(smoothed[knee_idx:]))
     if remaining_energy > peak_val * 0.9:
