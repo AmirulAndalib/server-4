@@ -170,3 +170,58 @@ async def test_beat_detection(provider: SmartFadesProvider) -> None:
     # Verify BPM is close to 120
     assert analysis.bpm is not None
     assert 115 < analysis.bpm < 125, f"Expected BPM ~120, got {analysis.bpm:.1f}"
+
+
+async def test_extended_analysis_fields(provider: SmartFadesProvider) -> None:
+    """Test that extended analysis fields (energy, centroid, key, phrases) are populated."""
+    audio_format = AudioFormat(
+        content_type=ContentType.PCM_F32LE,
+        bit_depth=32,
+        sample_rate=44100,
+        channels=2,
+    )
+
+    stream_details = Mock()
+    stream_details.item_id = "test_120bpm"
+    stream_details.provider = "test"
+    stream_details.queue_id = "test"
+    stream_details.uri = "test://120bpm"
+
+    session_id = "test:test:test_120bpm_extended"
+    await provider.start_analysis(session_id, stream_details, audio_format)
+
+    pcm_data = FIXTURE_PCM.read_bytes()
+    chunk_size = 44100 * 2 * 4  # 1 second at 44100 Hz, stereo, float32
+    offset = 0
+    while offset < len(pcm_data):
+        chunk = pcm_data[offset : offset + chunk_size]
+        await provider.process_pcm_chunk(session_id, chunk)
+        offset += chunk_size
+
+    await provider.finalize(session_id)
+
+    call_args = provider.mass.music.set_audio_analysis.call_args
+    analysis = call_args[0][3]
+
+    # Energy curve should be populated and normalized to [0, 1]
+    assert analysis.energy_curve is not None
+    assert len(analysis.energy_curve) > 0
+    assert analysis.energy_curve.max() <= 1.0
+    assert analysis.energy_curve.min() >= 0.0
+
+    # Spectral centroid should be populated with positive Hz values
+    assert analysis.spectral_centroid_curve is not None
+    assert len(analysis.spectral_centroid_curve) > 0
+    assert all(v >= 0 for v in analysis.spectral_centroid_curve)
+
+    # Musical key should be detected
+    assert analysis.musical_key is not None
+    assert analysis.musical_key["root"] in [
+        "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B",
+    ]
+    assert analysis.musical_key["mode"] in ["major", "minor"]
+    assert 0.0 <= analysis.musical_key["confidence"] <= 1.0
+
+    # BPM and beats should still be correct
+    assert analysis.bpm is not None
+    assert 115 < analysis.bpm < 125
