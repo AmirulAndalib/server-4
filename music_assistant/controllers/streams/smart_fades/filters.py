@@ -69,7 +69,7 @@ class GradualTimeStretchFilter(Filter):
             self.output_fadein_label = input_fadein_label.strip("[]")
             return []
 
-        cmd_parts = [f"{ts:.3f} [rb] tempo {ratio:.6f}" for ts, ratio in self.tempo_steps]
+        cmd_parts = [f"{ts:.3f} rb tempo {ratio:.6f}" for ts, ratio in self.tempo_steps]
         cmd_string = "; ".join(cmd_parts)
         initial_ratio = self.tempo_steps[0][1]
 
