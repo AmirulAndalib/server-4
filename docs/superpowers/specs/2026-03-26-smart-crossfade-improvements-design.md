@@ -353,29 +353,17 @@ CrossfadeFilter (acrossfade, equal-power or equal-gain based on energy slopes)
 
 ## Audio Analysis Provider Design
 
-All 4 new analysis features are computed within the **existing `SmartFadesProvider`** using **librosa** (already a project dependency, v0.11.0) for battle-tested, streaming-safe STFT-based features. The existing mel spectrogram and resampling logic is NOT modified — features piggyback on the same `audio_segment` that the Beat This feature extractor already constructs with proper overlap context.
+All 4 new analysis features are computed within the **existing `SmartFadesProvider`** using **librosa** (already a project dependency, v0.11.0) for battle-tested STFT-based features. The existing mel spectrogram, resampling logic, and feature extractor are NOT modified. Features are computed directly from `pcm_22k` (already available in `_process_block()`).
 
 ---
 
-### Streaming STFT Strategy: Shared Overlap Buffer
+### Streaming STFT Strategy: Direct Computation on pcm_22k
 
-**Problem:** STFT-based features (spectral centroid, chroma) produce different results when computed on chunks vs. whole songs, due to edge padding artifacts at chunk boundaries.
+**Approach:** Compute `librosa.stft(pcm_22k)` directly on each 10-second block of resampled PCM. No changes to the feature extractor or its overlap buffer.
 
-**Solution:** Reuse the overlap buffer already maintained by `AdvancedBeatFeatureExtractor`.
+**Boundary artifacts:** STFT frames at 10-second block boundaries have edge padding artifacts. Analysis shows this affects ~1.2% of per-second averaged values — statistically insignificant for phrase detection thresholds (0.15-0.40 combined score) and crossfade decisions. If higher accuracy is needed later, the shared overlap buffer approach can be adopted (the feature extractor's `_prev_samples` buffer already stores sufficient backward context for n_fft=2048).
 
-The feature extractor constructs an `audio_segment` for each 10-second block that includes overlap samples from `_prev_samples` (1906 samples = ~86ms of backward context). This is sufficient for librosa's default STFT (n_fft=2048, center=True, requiring n_fft/2 = 1024 samples of backward context).
-
-**How it works:**
-
-1. `AdvancedBeatFeatureExtractor.process_pcm()` is modified to return a tuple: `(log_mel_features, audio_segment)`. The mel spectrogram computation, resampling, overlap buffer logic, and frame delay mechanism are **completely untouched** — we simply expose the `audio_segment` that is already being constructed.
-
-2. In `SmartFadesProvider._process_block()`, after calling `data.features.process_pcm(pcm_22k)`, we receive the `audio_segment` and compute a streaming-safe STFT from it using `librosa.stft()`.
-
-3. A parallel frame-tracking state (a few integers) maps librosa's STFT frames (n_fft=2048, hop=512) to global positions, applying the same delay-and-recompute pattern as Beat This but for the different hop_length. This ensures boundary frames are recomputed with real forward context.
-
-4. The STFT magnitude `S` is passed to `librosa.feature.spectral_centroid(S=S)` and `librosa.feature.chroma_stft(S=S)` — zero redundant FFT computation.
-
-**Memory impact:** The `audio_segment` is already being constructed and would just be returned alongside the log-mel features instead of being discarded. No additional PCM storage. The STFT matrix `S` is transient — features are derived and `S` is discarded within the same block.
+**Memory impact:** The STFT matrix `S` is transient — features are derived and `S` is discarded within the same block. Only per-second scalar values are accumulated.
 
 ---
 
@@ -530,20 +518,17 @@ PCM chunk (raw, any sample rate)
   v
 decode + resample to pcm_22k (22050 Hz mono) [EXISTING, UNTOUCHED]
   |
-  v
-AdvancedBeatFeatureExtractor.process_pcm(pcm_22k) [EXISTING LOGIC UNTOUCHED]
-  |
-  +---> audio_segment (pcm_22k + overlap from _prev_samples) [NEWLY EXPOSED]
+  +---> AdvancedBeatFeatureExtractor.process_pcm(pcm_22k) [EXISTING, UNTOUCHED]
   |       |
-  |       +---> librosa.stft(audio_segment) -> S [NEW, streaming-safe via shared overlap]
-  |       |       |
-  |       |       +---> librosa.feature.spectral_centroid(S=S) -> per-sec [NEW]
-  |       |       |
-  |       |       +---> librosa.feature.chroma_stft(S=S) -> per-sec [NEW]
-  |       |
-  |       +---> RMS energy per second [NEW, from pcm_22k directly, no STFT needed]
+  |       +---> log-mel features (128 mels, 50 fps) [EXISTING, for Beat This]
   |
-  +---> log-mel features (128 mels, 50 fps) [EXISTING, for Beat This]
+  +---> librosa.stft(pcm_22k) -> S [NEW, direct on pcm_22k block]
+  |       |
+  |       +---> librosa.feature.spectral_centroid(S=S) -> per-sec [NEW]
+  |       |
+  |       +---> librosa.feature.chroma_stft(S=S) -> per-sec [NEW]
+  |
+  +---> RMS energy per second [NEW, from pcm_22k directly, no STFT needed]
 
 At finalize:
   |
@@ -555,41 +540,27 @@ At finalize:
   |
   +---> phrase boundaries from downbeats + energy + centroid [NEW]
   |
-  +---> store ExtendedSmartFadesAnalysis [MODIFIED to include new fields]
+  +---> store AudioAnalysisData with new fields [MODIFIED]
 ```
 
 ### Files to Modify
 
 1. **`music_assistant/providers/smart_fades/provider.py`** — Main changes:
-   - Extend `SmartFadesData` with: `energy_chunks`, `centroid_chunks`, `chroma_per_second`, `cumulative_seconds`, `librosa_frame_tracker` (parallel frame state for n_fft=2048/hop=512)
-   - After `process_pcm()`, compute shared STFT via `librosa.stft(audio_segment)` with parallel frame-range extraction
-   - Derive spectral centroid and chroma from shared STFT via librosa
+   - Extend `SmartFadesData` with: `energy_chunks`, `centroid_chunks`, `chroma_chunks`
+   - In `_process_block()`, compute `librosa.stft(pcm_22k)` and derive spectral centroid + chroma
    - Compute RMS energy from `pcm_22k` directly (no STFT needed)
    - Add key detection, phrase boundary detection, energy normalization in `finalize()`
-   - Store results as `ExtendedSmartFadesAnalysis`
+   - Store results as `AudioAnalysisData` with new optional fields
 
-2. **`music_assistant/providers/smart_fades/feature_extractor.py`** — Minimal change:
-   - Modify `process_pcm()` return type from `np.ndarray` to `tuple[np.ndarray, np.ndarray]` — returns `(log_mel_features, audio_segment)`
-   - NO changes to mel spectrogram computation, overlap buffer logic, resampling, or frame delay mechanism
-   - The `audio_segment` is already constructed at line 140; it's just returned instead of discarded
+2. **`music_assistant/providers/smart_fades/feature_extractor.py`** — NO CHANGES
 
 3. **`music_assistant/models/audio_analysis.py`** — Add optional fields to `AudioAnalysisData`: `phrase_boundaries`, `energy_curve`, `spectral_centroid_curve`, `musical_key`
 
 4. **New file: `music_assistant/providers/smart_fades/analysis_helpers.py`** — Helper functions:
-   - `compute_rms_per_second(pcm_22k, sr) -> np.ndarray`
-   - `compute_stft_features(audio_segment, sr, frame_tracker) -> tuple[np.ndarray, np.ndarray]` — returns (centroid_per_sec, chroma_per_sec) from shared STFT
-   - `detect_key(chroma_per_second, duration) -> MusicalKey`
-   - `detect_phrase_boundaries(downbeats, energy, centroid, bpm) -> list[PhraseBoundary]`
-
-### Streaming Frame Tracking for librosa STFT
-
-The feature extractor's frame delay mechanism ensures Beat This mel frames have proper forward context. We need the same for the librosa STFT, but with different params (n_fft=2048, hop=512 vs. n_fft=1024, hop=441).
-
-The `librosa_frame_tracker` maintains:
-- `last_output_frame: int` — last global frame index emitted
-- `frames_to_delay: int` — `ceil((2048 // 2) / 512) = 2` frames to hold back
-
-Since the `audio_segment` already has sufficient backward context (1906 samples > 1024 needed), we compute `librosa.stft()` on the full segment and extract only the frames corresponding to this block, minus the delayed frames — the same pattern as `feature_extractor.py` lines 158-170.
+   - `compute_rms_per_second(pcm, sr) -> np.ndarray`
+   - `compute_stft_features(pcm, sr) -> tuple[np.ndarray, np.ndarray]` — returns (centroid_per_sec, chroma_per_sec) from single STFT
+   - `detect_key(chroma_per_second, duration) -> dict`
+   - `detect_phrase_boundaries(downbeats, energy, centroid, bpm) -> list[dict]`
 
 ### CPU Budget Summary
 
@@ -603,6 +574,8 @@ Since the `audio_segment` already has sufficient backward context (1906 samples 
 | Key detection (K-S) | — | ~0.1ms | — |
 | **Total additional** | **~6.1ms** | **~0.21ms** | **~56 bytes/sec** |
 
-**Comparison:** Existing Beat This mel extraction costs ~50-100ms per 10s block. Additional analysis adds ~6-12% overhead. The shared STFT approach is more efficient than computing 3 separate FFTs (centroid + chroma + separate), since `librosa.stft()` is computed once and all features are derived from its output.
+**Comparison:** Existing Beat This mel extraction costs ~50-100ms per 10s block. Additional analysis adds ~6-12% overhead. One `librosa.stft()` per block, spectral centroid and chroma both derived from the same STFT matrix.
 
-**Key advantage over hand-rolled numpy FFT:** librosa handles windowing, normalization, frequency bin mapping, and chroma folding correctly out of the box. The spectral centroid and chroma implementations are well-tested across thousands of MIR research projects.
+**Key advantage over hand-rolled numpy FFT:** librosa handles windowing, normalization, frequency bin mapping, and chroma folding correctly out of the box.
+
+**Future optimization:** If boundary artifacts become a concern, the feature extractor's overlap buffer (1906 samples) already provides sufficient backward context for n_fft=2048. The shared overlap buffer approach can be adopted without architectural changes.

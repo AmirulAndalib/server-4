@@ -2,11 +2,11 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Add energy curve, spectral centroid, musical key, and phrase boundary computation to the existing SmartFadesProvider using librosa, piggybacking on the shared overlap buffer.
+**Goal:** Add energy curve, spectral centroid, musical key, and phrase boundary computation to the existing SmartFadesProvider using librosa.
 
-**Architecture:** The feature extractor exposes its `audio_segment` (already constructed with overlap context) alongside log-mel features. The provider computes one `librosa.stft()` per 10s block on that segment, then derives spectral centroid, chroma, and RMS from it. At finalize, key detection (Krumhansl-Schmuckler) and phrase boundary detection (4/8/16-bar heuristic with energy + centroid deltas) run on the accumulated data. Results are stored as `AudioAnalysisData` with the new optional fields.
+**Architecture:** The provider computes `librosa.stft()` directly on the `pcm_22k` already available in `_process_block()`. One STFT per 10s block, spectral centroid and chroma derived from it. RMS computed from raw PCM (no STFT needed). At finalize, key detection (Krumhansl-Schmuckler) and phrase boundary detection (4/8/16-bar heuristic with energy + centroid deltas) run on the accumulated data. Results stored as `AudioAnalysisData` with new optional fields. No changes to `feature_extractor.py`.
 
-**Tech Stack:** Python 3.12+, librosa 0.11.0 (existing dependency), numpy, torchaudio (existing)
+**Tech Stack:** Python 3.12+, librosa 0.11.0 (existing dependency), numpy
 
 **Spec:** `docs/superpowers/specs/2026-03-26-smart-crossfade-improvements-design.md` — "Audio Analysis Provider Design" section
 
@@ -17,7 +17,6 @@
 | File | Action | Responsibility |
 |------|--------|---------------|
 | `music_assistant/models/audio_analysis.py` | Modify | Add optional fields: `energy_curve`, `spectral_centroid_curve`, `phrase_boundaries`, `musical_key` |
-| `music_assistant/providers/smart_fades/feature_extractor.py` | Modify | Return `(log_mel_features, audio_segment)` tuple from `process_pcm()` and `finalize()` |
 | `music_assistant/providers/smart_fades/provider.py` | Modify | Extend `SmartFadesData`, add librosa STFT + feature extraction in `_process_block()`, add key/phrase detection in `finalize()` |
 | `music_assistant/providers/smart_fades/analysis_helpers.py` | Create | Helper functions: RMS, STFT features, key detection, phrase boundaries |
 | `tests/providers/smart_fades/test_analysis_helpers.py` | Create | Unit tests for all helper functions |
@@ -70,153 +69,7 @@ git commit -m "feat: add energy, spectral, phrase, key fields to AudioAnalysisDa
 
 ---
 
-### Task 2: Expose audio_segment from feature extractor
-
-**Files:**
-- Modify: `music_assistant/providers/smart_fades/feature_extractor.py:94-198`
-- Modify: `music_assistant/providers/smart_fades/provider.py:272-298`
-
-- [ ] **Step 1: Modify process_pcm() return type**
-
-In `feature_extractor.py`, change `process_pcm` (line 94) to return `tuple[np.ndarray, np.ndarray]` — `(log_mel_features, audio_segment)`.
-
-```python
-    async def process_pcm(self, pcm: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """Process a PCM chunk and return log-mel features and the overlap-corrected audio segment.
-
-        :param pcm: Audio samples as float32 array.
-        :return: Tuple of (log-mel features with shape (T, n_mels), audio_segment with overlap).
-        """
-
-        def _process_sync() -> tuple[np.ndarray, np.ndarray]:
-            chunk_start = self._total_samples
-            chunk_end = chunk_start + len(pcm)
-
-            # Determine which frames belong to this chunk.
-            if chunk_start == 0:
-                first_frame = 0
-            elif self._last_output_frame >= 0:
-                first_frame = self._last_output_frame + 1
-            else:
-                first_frame = (chunk_start + self.hop_length - 1) // self.hop_length
-
-            last_frame = (chunk_end - 1) // self.hop_length
-            output_last_frame = last_frame - self._frames_to_delay
-
-            if output_last_frame < first_frame:
-                self._prev_samples = pcm[-self._keep_samples :].copy()
-                self._total_samples = chunk_end
-                empty = np.array([], dtype=np.float32).reshape(0, self._n_mels)
-                return empty, np.array([], dtype=np.float32)
-
-            needed_start = max(0, first_frame * self.hop_length - self.n_fft // 2)
-            audio_start = (needed_start // self.hop_length) * self.hop_length
-
-            if self._prev_samples is not None and audio_start < chunk_start:
-                prev_needed = chunk_start - audio_start
-                prev_to_use = self._prev_samples[-prev_needed:]
-                audio_segment = np.concatenate([prev_to_use, pcm])
-            else:
-                audio_segment = pcm
-                audio_start = chunk_start
-
-            self._prev_samples = pcm[-self._keep_samples :].copy()
-            self._total_samples = chunk_end
-
-            tensor = torch.from_numpy(audio_segment).to(self._device)
-            with torch.no_grad():
-                mel = self._mel_spec(tensor)
-                log_mel = torch.log1p(1000.0 * mel)
-            features = log_mel.T.cpu().numpy().astype(np.float32)
-
-            segment_first_global_frame = audio_start // self.hop_length
-            start_in_segment = first_frame - segment_first_global_frame
-            end_in_segment = output_last_frame - segment_first_global_frame + 1
-            start_in_segment = max(0, start_in_segment)
-            end_in_segment = min(len(features), end_in_segment)
-
-            self._last_output_frame = output_last_frame
-
-            return features[start_in_segment:end_in_segment], audio_segment
-
-        return await asyncio.to_thread(_process_sync)
-```
-
-- [ ] **Step 2: Modify finalize() return type**
-
-In `feature_extractor.py`, change `finalize` (line 174) to also return the audio segment:
-
-```python
-    async def finalize(self) -> tuple[np.ndarray, np.ndarray]:
-        """Flush delayed frames and process any remaining samples.
-
-        :return: Tuple of (final log-mel features, audio_segment used).
-        """
-
-        def _finalize_sync() -> tuple[np.ndarray, np.ndarray]:
-            if self._prev_samples is None or len(self._prev_samples) == 0:
-                empty = np.array([], dtype=np.float32).reshape(0, self._n_mels)
-                return empty, np.array([], dtype=np.float32)
-
-            total_frames = 1 + self._total_samples // self.hop_length
-            extra_count = total_frames - self._last_output_frame - 1
-            if extra_count <= 0:
-                empty = np.array([], dtype=np.float32).reshape(0, self._n_mels)
-                return empty, self._prev_samples.copy()
-
-            tensor = torch.from_numpy(self._prev_samples).to(self._device)
-            with torch.no_grad():
-                mel = self._mel_spec(tensor)
-                log_mel = torch.log1p(1000.0 * mel)
-            features = log_mel.T.cpu().numpy().astype(np.float32)
-
-            return features[-extra_count:], self._prev_samples.copy()
-
-        return await asyncio.to_thread(_finalize_sync)
-```
-
-- [ ] **Step 3: Update provider._process_block() to unpack the tuple**
-
-In `provider.py`, update `_process_block` (line 293) to handle the new return type:
-
-```python
-        # Change line 293 from:
-        # feats = await data.features.process_pcm(pcm_22k)
-        # To:
-        feats, _audio_segment = await data.features.process_pcm(pcm_22k)
-```
-
-- [ ] **Step 4: Update provider.finalize() to unpack the tuple**
-
-In `provider.py`, update `finalize` (line 189):
-
-```python
-        # Change line 189 from:
-        # final_feats = await data.features.finalize()
-        # To:
-        final_feats, _final_segment = await data.features.finalize()
-```
-
-- [ ] **Step 5: Run tests to verify no regression**
-
-Run: `cd /Users/marvin/git/music-assistant/server && pytest tests/providers/smart_fades/test_provider.py -v`
-Expected: `test_beat_detection` PASSES (return type changed but existing behavior preserved)
-
-- [ ] **Step 6: Run pre-commit**
-
-Run: `cd /Users/marvin/git/music-assistant/server && pre-commit run --all-files`
-Expected: All checks pass
-
-- [ ] **Step 7: Commit**
-
-```bash
-git add music_assistant/providers/smart_fades/feature_extractor.py music_assistant/providers/smart_fades/provider.py
-git commit -m "feat: expose audio_segment from feature extractor for librosa analysis"
-```
-
----
-
-### Task 3: Create analysis_helpers.py with RMS energy
+### Task 2: Create analysis_helpers.py with RMS energy
 
 **Files:**
 - Create: `music_assistant/providers/smart_fades/analysis_helpers.py`
@@ -287,8 +140,7 @@ Create `music_assistant/providers/smart_fades/analysis_helpers.py`:
 
 Computes energy curves, spectral centroids, chroma/key detection,
 and phrase boundary detection from streaming PCM audio. Uses librosa
-for STFT-based features piggybacking on the shared overlap buffer
-from AdvancedBeatFeatureExtractor.
+for STFT-based features computed directly on pcm_22k blocks.
 """
 
 from __future__ import annotations
@@ -337,7 +189,7 @@ git commit -m "feat: add compute_rms_per_second helper for energy curve analysis
 
 ---
 
-### Task 4: Add STFT-based feature extraction (spectral centroid + chroma)
+### Task 3: Add STFT-based feature extraction (spectral centroid + chroma)
 
 **Files:**
 - Modify: `music_assistant/providers/smart_fades/analysis_helpers.py`
@@ -349,7 +201,6 @@ Add to `tests/providers/smart_fades/test_analysis_helpers.py`:
 
 ```python
 from music_assistant.providers.smart_fades.analysis_helpers import (
-    LibrosaFrameTracker,
     compute_rms_per_second,
     compute_stft_features,
 )
@@ -362,8 +213,7 @@ def test_compute_stft_features_sine_wave() -> None:
     t = np.linspace(0, duration, sr * duration, endpoint=False, dtype=np.float32)
     sine = np.sin(2 * np.pi * 440 * t)
 
-    tracker = LibrosaFrameTracker(sr=sr)
-    centroid_per_sec, chroma_per_sec = compute_stft_features(sine, sr, tracker)
+    centroid_per_sec, chroma_per_sec = compute_stft_features(sine, sr)
 
     assert len(centroid_per_sec) == duration
     # Spectral centroid of a pure 440 Hz tone should be ~440 Hz
@@ -381,17 +231,9 @@ def test_compute_stft_features_empty() -> None:
     """Empty audio should return empty arrays."""
     sr = 22050
     empty = np.array([], dtype=np.float32)
-    tracker = LibrosaFrameTracker(sr=sr)
-    centroid, chroma = compute_stft_features(empty, sr, tracker)
+    centroid, chroma = compute_stft_features(empty, sr)
     assert len(centroid) == 0
     assert chroma.shape[1] == 12
-
-
-def test_librosa_frame_tracker_delay() -> None:
-    """Frame tracker should delay frames for streaming parity."""
-    tracker = LibrosaFrameTracker(sr=22050, n_fft=2048, hop_length=512)
-    assert tracker.frames_to_delay == 2  # ceil(1024 / 512)
-    assert tracker.last_output_frame == -1
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -399,97 +241,56 @@ def test_librosa_frame_tracker_delay() -> None:
 Run: `cd /Users/marvin/git/music-assistant/server && pytest tests/providers/smart_fades/test_analysis_helpers.py::test_compute_stft_features_sine_wave -v`
 Expected: FAIL — `ImportError: cannot import name 'compute_stft_features'`
 
-- [ ] **Step 3: Implement LibrosaFrameTracker and compute_stft_features**
+- [ ] **Step 3: Implement compute_stft_features**
 
 Add to `music_assistant/providers/smart_fades/analysis_helpers.py`:
 
 ```python
-import math
-from dataclasses import dataclass, field
-
 import librosa
 
 
-@dataclass
-class LibrosaFrameTracker:
-    """Track frame positions for streaming-safe librosa STFT.
-
-    Mirrors the delay-and-recompute pattern from AdvancedBeatFeatureExtractor
-    but for librosa's STFT params (n_fft=2048, hop=512 by default).
-    """
-
-    sr: int = 22050
-    n_fft: int = 2048
-    hop_length: int = 512
-    last_output_frame: int = -1
-    total_samples: int = 0
-    frames_to_delay: int = field(init=False)
-
-    def __post_init__(self) -> None:
-        """Compute frames_to_delay from STFT params."""
-        self.frames_to_delay = math.ceil((self.n_fft // 2) / self.hop_length)
-
-
 def compute_stft_features(
-    audio_segment: npt.NDArray[np.float32],
-    sr: int,
-    tracker: LibrosaFrameTracker,
+    pcm: npt.NDArray[np.float32],
+    sr: int = 22050,
+    n_fft: int = 2048,
+    hop_length: int = 512,
 ) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]:
-    """Compute spectral centroid and chroma from a shared librosa STFT.
+    """Compute spectral centroid and chroma from a single librosa STFT.
 
-    Uses the audio_segment (with overlap context from the feature extractor)
-    to compute a streaming-safe STFT. Derives per-second spectral centroid
-    and per-second 12-bin chroma from the same STFT matrix.
+    Computes one STFT on the pcm block and derives both features from it.
+    Per-second averaging reduces per-frame data to one value per second.
 
-    :param audio_segment: PCM float32 array with overlap context from feature extractor.
-    :param sr: Sample rate (should be 22050).
-    :param tracker: Frame tracker for streaming parity.
+    Boundary artifacts at 10s block edges are negligible (~1.2% on per-second
+    values) and do not affect phrase detection thresholds.
+
+    :param pcm: Audio samples as float32 array at the given sample rate.
+    :param sr: Sample rate in Hz.
+    :param n_fft: FFT window size.
+    :param hop_length: Hop length between STFT frames.
     :return: Tuple of (centroid_per_second, chroma_per_second).
              centroid_per_second shape: (T_seconds,)
              chroma_per_second shape: (T_seconds, 12)
     """
-    if len(audio_segment) < tracker.n_fft:
+    if len(pcm) < n_fft:
         empty_centroid = np.array([], dtype=np.float32)
         empty_chroma = np.zeros((0, 12), dtype=np.float32)
         return empty_centroid, empty_chroma
 
     # Compute STFT once — all features derived from this
-    stft_matrix = np.abs(librosa.stft(
-        y=audio_segment,
-        n_fft=tracker.n_fft,
-        hop_length=tracker.hop_length,
-        center=True,
-    ))
+    stft_matrix = np.abs(librosa.stft(y=pcm, n_fft=n_fft, hop_length=hop_length, center=True))
 
-    # Extract frame range for this block (parallel to feature_extractor logic)
-    n_frames = stft_matrix.shape[1]
-    if tracker.last_output_frame < 0:
-        first_frame = 0
-    else:
-        # Frames from audio_segment include overlap; compute offset
-        first_frame = 0  # We process all frames from the segment
-
-    # Delay last frames for recompute with next block's forward context
-    output_end = n_frames - tracker.frames_to_delay
-    if output_end <= 0:
-        empty_centroid = np.array([], dtype=np.float32)
-        empty_chroma = np.zeros((0, 12), dtype=np.float32)
-        return empty_centroid, empty_chroma
-
-    stft_block = stft_matrix[:, :output_end]
-
-    # Spectral centroid per frame, then average to per-second
+    # Spectral centroid per frame
     centroid_per_frame = librosa.feature.spectral_centroid(
-        S=stft_block, sr=sr, n_fft=tracker.n_fft, hop_length=tracker.hop_length,
+        S=stft_matrix, sr=sr, n_fft=n_fft, hop_length=hop_length,
     )[0]
 
-    # Chroma per frame
+    # Chroma per frame (12 bins)
     chroma_per_frame = librosa.feature.chroma_stft(
-        S=stft_block, sr=sr, n_fft=tracker.n_fft, hop_length=tracker.hop_length,
+        S=stft_matrix, sr=sr, n_fft=n_fft, hop_length=hop_length,
     )  # shape: (12, T_frames)
 
     # Average to per-second
-    frames_per_sec = sr // tracker.hop_length
+    frames_per_sec = sr // hop_length
     if frames_per_sec == 0:
         frames_per_sec = 1
     n_full_seconds = len(centroid_per_frame) // frames_per_sec
@@ -504,8 +305,6 @@ def compute_stft_features(
 
     trimmed_chroma = chroma_per_frame[:, : n_full_seconds * frames_per_sec]
     chroma_per_sec = trimmed_chroma.reshape(12, n_full_seconds, frames_per_sec).mean(axis=2).T
-
-    tracker.last_output_frame += output_end
 
     return centroid_per_sec.astype(np.float32), chroma_per_sec.astype(np.float32)
 ```
@@ -529,7 +328,7 @@ git commit -m "feat: add librosa STFT-based spectral centroid and chroma extract
 
 ---
 
-### Task 5: Add key detection helper
+### Task 4: Add key detection helper
 
 **Files:**
 - Modify: `music_assistant/providers/smart_fades/analysis_helpers.py`
@@ -545,9 +344,7 @@ from music_assistant.providers.smart_fades.analysis_helpers import detect_key
 
 def test_detect_key_c_major() -> None:
     """Chroma weighted toward C, E, G should detect C major."""
-    # 20 seconds of chroma, one per second
     chroma = np.zeros((20, 12), dtype=np.float32)
-    # C=0, E=4, G=7 are the C major triad
     chroma[:, 0] = 1.0  # C
     chroma[:, 4] = 0.8  # E
     chroma[:, 7] = 0.6  # G
@@ -562,7 +359,6 @@ def test_detect_key_c_major() -> None:
 def test_detect_key_a_minor() -> None:
     """Chroma weighted toward A, C, E should detect A minor."""
     chroma = np.zeros((20, 12), dtype=np.float32)
-    # A=9, C=0, E=4 are the A minor triad
     chroma[:, 9] = 1.0  # A
     chroma[:, 0] = 0.8  # C
     chroma[:, 4] = 0.6  # E
@@ -576,7 +372,6 @@ def test_detect_key_a_minor() -> None:
 
 def test_detect_key_filters_intro_outro() -> None:
     """First and last 10s should be excluded from key detection."""
-    # 30 seconds of chroma: first 10s = F major, middle 10s = C major, last 10s = F major
     chroma = np.zeros((30, 12), dtype=np.float32)
     # First/last 10s: F major (F=5, A=9, C=0)
     chroma[:10, 5] = 1.0
@@ -592,7 +387,6 @@ def test_detect_key_filters_intro_outro() -> None:
 
     key = detect_key(chroma, duration=30.0)
 
-    # Should detect C major (middle section), not F major (intro/outro)
     assert key["root"] == "C"
     assert key["mode"] == "major"
 ```
@@ -607,7 +401,6 @@ Expected: FAIL — `ImportError: cannot import name 'detect_key'`
 Add to `music_assistant/providers/smart_fades/analysis_helpers.py`:
 
 ```python
-# Module-level constants for Krumhansl-Schmuckler key profiles
 _KRUMHANSL_MAJOR = np.array(
     [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
 )
@@ -633,7 +426,6 @@ def detect_key(
     if len(chroma_per_second) == 0:
         return {"root": "C", "mode": "major", "confidence": 0.0}
 
-    # Filter out first/last 10 seconds
     if len(chroma_per_second) > 20:
         trimmed = chroma_per_second[10:-10]
     else:
@@ -689,7 +481,7 @@ git commit -m "feat: add Krumhansl-Schmuckler key detection with intro/outro fil
 
 ---
 
-### Task 6: Add phrase boundary detection helper
+### Task 5: Add phrase boundary detection helper
 
 **Files:**
 - Modify: `music_assistant/providers/smart_fades/analysis_helpers.py`
@@ -707,18 +499,15 @@ def test_detect_phrase_boundaries_energy_drop() -> None:
     """Should detect a phrase boundary at an 8-bar downbeat with energy drop."""
     bpm = 120.0
     bar_duration = 4 * (60.0 / bpm)  # 2.0 seconds per bar
-    # 32 downbeats = 32 bars, each 2s apart
     downbeats = np.arange(32) * bar_duration
 
-    # Energy: high for first 16 bars, drops to low for last 16 bars
-    duration_sec = int(32 * bar_duration)  # 64 seconds
+    duration_sec = int(32 * bar_duration)
     energy = np.ones(duration_sec, dtype=np.float32) * 0.8
     energy[32:] = 0.2  # Drop at bar 16 (second 32)
     centroid = np.ones(duration_sec, dtype=np.float32) * 1000.0
 
     boundaries = detect_phrase_boundaries(downbeats, energy, centroid, bpm)
 
-    # Should find a boundary near second 32 (bar 16, which is a 16-bar boundary)
     boundary_times = [b["time"] for b in boundaries]
     assert any(abs(t - 32.0) < 2.0 for t in boundary_times), (
         f"Expected boundary near 32.0s, got {boundary_times}"
@@ -732,7 +521,7 @@ def test_detect_phrase_boundaries_spectral_change() -> None:
     downbeats = np.arange(32) * bar_duration
 
     duration_sec = int(32 * bar_duration)
-    energy = np.ones(duration_sec, dtype=np.float32) * 0.5  # Flat energy
+    energy = np.ones(duration_sec, dtype=np.float32) * 0.5
     centroid = np.ones(duration_sec, dtype=np.float32) * 500.0
     centroid[32:] = 2000.0  # Big spectral jump at bar 16
 
@@ -800,12 +589,10 @@ def detect_phrase_boundaries(
         if sec_idx < 2 or sec_idx >= len(energy_curve) - 2:
             continue
 
-        # Energy delta (2s window before/after)
         e_before = float(np.mean(energy_curve[max(0, sec_idx - 2) : sec_idx]))
         e_after = float(np.mean(energy_curve[sec_idx : min(len(energy_curve), sec_idx + 2)]))
         energy_delta = abs(e_after - e_before) / max(e_before, 1e-10)
 
-        # Spectral centroid delta
         if sec_idx < len(centroid_curve) - 2:
             c_before = float(np.mean(centroid_curve[max(0, sec_idx - 2) : sec_idx]))
             c_after = float(np.mean(centroid_curve[sec_idx : min(len(centroid_curve), sec_idx + 2)]))
@@ -857,7 +644,7 @@ git commit -m "feat: add phrase boundary detection with energy + centroid deltas
 
 ---
 
-### Task 7: Integrate analysis features into SmartFadesProvider
+### Task 6: Integrate analysis features into SmartFadesProvider
 
 **Files:**
 - Modify: `music_assistant/providers/smart_fades/provider.py:73-86` (SmartFadesData)
@@ -887,14 +674,12 @@ class SmartFadesData:
     energy_chunks: list[np.ndarray] = field(default_factory=list)
     centroid_chunks: list[np.ndarray] = field(default_factory=list)
     chroma_chunks: list[np.ndarray] = field(default_factory=list)
-    librosa_tracker: LibrosaFrameTracker | None = None
 ```
 
 Add the import at the top of `provider.py`:
 
 ```python
 from .analysis_helpers import (
-    LibrosaFrameTracker,
     compute_rms_per_second,
     compute_stft_features,
     detect_key,
@@ -902,25 +687,9 @@ from .analysis_helpers import (
 )
 ```
 
-- [ ] **Step 2: Initialize librosa_tracker in start_analysis**
+- [ ] **Step 2: Add feature extraction to _process_block**
 
-In `provider.py`, in `start_analysis()` (around line 145 where `SmartFadesData` is constructed), ensure `librosa_tracker` is initialized:
-
-```python
-        data = SmartFadesData(
-            item_id=stream_details.item_id,
-            provider=stream_details.provider,
-            input_audio_format=audio_format,
-            block_samples=block_samples,
-            features=AdvancedBeatFeatureExtractor(device=self._device),
-            resampler=resampler,
-            librosa_tracker=LibrosaFrameTracker(sr=ANALYSIS_SAMPLE_RATE),
-        )
-```
-
-- [ ] **Step 3: Add feature extraction to _process_block**
-
-In `provider.py`, update `_process_block` to compute features from the audio_segment:
+In `provider.py`, update `_process_block` to compute features from `pcm_22k`:
 
 ```python
     async def _process_block(self, data: SmartFadesData, *, last: bool = False) -> None:
@@ -937,7 +706,7 @@ In `provider.py`, update `_process_block` to compute features from the audio_seg
         data.total_pcm_samples += len(pcm_22k)
 
         start_time = time.perf_counter()
-        feats, audio_segment = await data.features.process_pcm(pcm_22k)
+        feats = await data.features.process_pcm(pcm_22k)
         elapsed_ms = (time.perf_counter() - start_time) * 1000
 
         if feats.size:
@@ -949,9 +718,9 @@ In `provider.py`, update `_process_block` to compute features from the audio_seg
             data.energy_chunks.append(rms)
 
         # Extended analysis: spectral centroid + chroma from shared STFT
-        if len(audio_segment) >= 2048 and data.librosa_tracker is not None:
+        if len(pcm_22k) >= 2048:
             centroid, chroma = await asyncio.to_thread(
-                compute_stft_features, audio_segment, ANALYSIS_SAMPLE_RATE, data.librosa_tracker,
+                compute_stft_features, pcm_22k, ANALYSIS_SAMPLE_RATE,
             )
             if len(centroid) > 0:
                 data.centroid_chunks.append(centroid)
@@ -961,7 +730,7 @@ In `provider.py`, update `_process_block` to compute features from the audio_seg
         self.logger.debug("Processed 10s of PCM chunks in %.1fms", elapsed_ms)
 ```
 
-- [ ] **Step 4: Update finalize to compute and store extended analysis**
+- [ ] **Step 3: Update finalize to compute and store extended analysis**
 
 In `provider.py`, update `finalize()` to run key detection and phrase boundaries after Beat This inference:
 
@@ -972,12 +741,10 @@ In `provider.py`, update `finalize()` to run key detection and phrase boundaries
         if not data:
             return
 
-        # Flush remaining buffered PCM
         if data.pcm_samples:
             await self._process_block(data, last=True)
 
-        # Get final features with end padding
-        final_feats, _final_segment = await data.features.finalize()
+        final_feats = await data.features.finalize()
         if final_feats.size:
             data.feature_blocks.append(final_feats)
 
@@ -1007,7 +774,7 @@ In `provider.py`, update `finalize()` to run key detection and phrase boundaries
             energy_curve = np.concatenate(data.energy_chunks)
             peak = energy_curve.max()
             if peak > 0:
-                energy_curve = energy_curve / peak  # Normalize to [0, 1]
+                energy_curve = energy_curve / peak
 
         spectral_centroid_curve = None
         if data.centroid_chunks:
@@ -1018,11 +785,11 @@ In `provider.py`, update `finalize()` to run key detection and phrase boundaries
             chroma_all = np.concatenate(data.chroma_chunks, axis=0)
             musical_key = detect_key(chroma_all, duration)
 
-        phrase_boundaries = []
+        phrase_boundaries = None
         if energy_curve is not None and spectral_centroid_curve is not None and len(downbeats) >= 4:
             phrase_boundaries = detect_phrase_boundaries(
                 downbeats, energy_curve, spectral_centroid_curve, bpm,
-            )
+            ) or None
 
         analysis = AudioAnalysisData(
             bpm=bpm,
@@ -1032,7 +799,7 @@ In `provider.py`, update `finalize()` to run key detection and phrase boundaries
             energy_curve=energy_curve,
             spectral_centroid_curve=spectral_centroid_curve,
             musical_key=musical_key,
-            phrase_boundaries=phrase_boundaries if phrase_boundaries else None,
+            phrase_boundaries=phrase_boundaries,
         )
 
         await self.mass.music.set_audio_analysis(
@@ -1051,21 +818,21 @@ In `provider.py`, update `finalize()` to run key detection and phrase boundaries
             len(beats),
             len(downbeats),
             musical_key["root"] + " " + musical_key["mode"] if musical_key else "unknown",
-            len(phrase_boundaries),
+            len(phrase_boundaries) if phrase_boundaries else 0,
         )
 ```
 
-- [ ] **Step 5: Run pre-commit**
+- [ ] **Step 4: Run pre-commit**
 
 Run: `cd /Users/marvin/git/music-assistant/server && pre-commit run --all-files`
 Expected: All checks pass
 
-- [ ] **Step 6: Run existing tests to verify no regression**
+- [ ] **Step 5: Run existing tests to verify no regression**
 
 Run: `cd /Users/marvin/git/music-assistant/server && pytest tests/providers/smart_fades/test_provider.py -v`
-Expected: `test_beat_detection` PASSES (extended fields are populated but existing assertions still hold)
+Expected: `test_beat_detection` PASSES
 
-- [ ] **Step 7: Commit**
+- [ ] **Step 6: Commit**
 
 ```bash
 git add music_assistant/providers/smart_fades/provider.py
@@ -1074,7 +841,7 @@ git commit -m "feat: integrate librosa analysis features into SmartFadesProvider
 
 ---
 
-### Task 8: Add integration test for extended analysis
+### Task 7: Add integration test for extended analysis
 
 **Files:**
 - Modify: `tests/providers/smart_fades/test_provider.py`
