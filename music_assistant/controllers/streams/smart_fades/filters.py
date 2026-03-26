@@ -115,6 +115,37 @@ class TrimFilter(Filter):
         return f"Trim(trim={self.fadein_start_pos:.2f}s)"
 
 
+class FadeoutTrimFilter(Filter):
+    """Filter that trims the outgoing track to end at a specific position.
+
+    Used in energy-aligned crossfades to position Song A's crossfade
+    start at the energy knee rather than at the end of the buffer.
+    """
+
+    output_fadeout_label: str = "fadeout_endtrim"
+    output_fadein_label: str = "fadein_endtrim_pass"
+
+    def __init__(self, logger: logging.Logger, fadeout_end_pos: float):
+        """Initialize fadeout trim filter.
+
+        :param logger: Logger for debug output.
+        :param fadeout_end_pos: Position in seconds to trim the outgoing track's end to.
+        """
+        self.fadeout_end_pos = fadeout_end_pos
+        super().__init__(logger)
+
+    def apply(self, input_fadein_label: str, input_fadeout_label: str) -> list[str]:
+        """Trim the outgoing track to end at fadeout_end_pos."""
+        return [
+            f"{input_fadeout_label}atrim=end={self.fadeout_end_pos},asetpts=PTS-STARTPTS[{self.output_fadeout_label}]",
+            f"{input_fadein_label}anull[{self.output_fadein_label}]",  # codespell:ignore anull
+        ]
+
+    def __repr__(self) -> str:
+        """Return string representation of FadeoutTrimFilter."""
+        return f"FadeoutTrim(end={self.fadeout_end_pos:.2f}s)"
+
+
 class FrequencySweepFilter(Filter):
     """Filter that creates frequency sweep effects (lowpass/highpass transitions)."""
 

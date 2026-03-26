@@ -21,6 +21,7 @@ from music_assistant.controllers.streams.smart_fades.crossfade_helpers import (
 )
 from music_assistant.controllers.streams.smart_fades.filters import (
     CrossfadeFilter,
+    FadeoutTrimFilter,
     Filter,
     FrequencySweepFilter,
     GradualTimeStretchFilter,
@@ -204,11 +205,11 @@ class SmartCrossFade(SmartFade):
 
     def _try_energy_alignment(
         self,
-    ) -> tuple[bool, float | None, float, str | None, npt.NDArray[np.float64]]:
+    ) -> tuple[bool, float | None, float | None, float, str | None, npt.NDArray[np.float64]]:
         """Attempt energy-contour alignment for crossfade parameters.
 
-        :return: Tuple of (energy_aligned, fadein_start_pos, crossfade_duration,
-                 curve_type, fadeout_downbeats_rel).
+        :return: Tuple of (energy_aligned, fadeout_start_pos, fadein_start_pos,
+                 crossfade_duration, curve_type, fadeout_downbeats_rel).
         """
         empty_downbeats: npt.NDArray[np.float64] = np.array([])
         if self.fade_out_energy is None or self.fade_in_energy is None:
@@ -217,7 +218,7 @@ class SmartCrossFade(SmartFade):
                 "present" if self.fade_out_energy is not None else "None",
                 "present" if self.fade_in_energy is not None else "None",
             )
-            return False, None, 0.0, None, empty_downbeats
+            return False, None, None, 0.0, None, empty_downbeats
 
         buffer_secs = min(SMART_CROSSFADE_DURATION, int(self.fade_out_duration))
         energy_out = (
@@ -258,7 +259,7 @@ class SmartCrossFade(SmartFade):
                 f"{fadeout_start:.1f}s" if fadeout_start is not None else "None (no clear decline)",
                 f"{fadein_entry:.1f}s" if fadein_entry is not None else "None (no clear build)",
             )
-            return False, None, 0.0, None, fadeout_downbeats_rel
+            return False, None, None, 0.0, None, fadeout_downbeats_rel
 
         crossfade_duration = calculate_energy_crossfade_duration(
             energy_out=energy_out,
@@ -274,7 +275,14 @@ class SmartCrossFade(SmartFade):
         if len(overlap_out) > 1 and len(overlap_in) > 1:
             curve_type = select_crossfade_curve_type(overlap_out, overlap_in)
 
-        return True, fadein_entry, crossfade_duration, curve_type, fadeout_downbeats_rel
+        return (
+            True,
+            fadeout_start,
+            fadein_entry,
+            crossfade_duration,
+            curve_type,
+            fadeout_downbeats_rel,
+        )
 
     def _build(self) -> None:
         """Build the smart fades filter chain."""
@@ -299,9 +307,14 @@ class SmartCrossFade(SmartFade):
         )
 
         # === Energy-contour alignment (preferred path) ===
-        energy_aligned, fadein_start_pos, crossfade_duration, curve_type, fadeout_downbeats_rel = (
-            self._try_energy_alignment()
-        )
+        (
+            energy_aligned,
+            fadeout_start_pos,
+            fadein_start_pos,
+            crossfade_duration,
+            curve_type,
+            fadeout_downbeats_rel,
+        ) = self._try_energy_alignment()
         crossfade_bars: int = 0
 
         # === Fallback: bar-counting approach ===
@@ -317,7 +330,9 @@ class SmartCrossFade(SmartFade):
             crossfade_duration = self._calculate_crossfade_duration(crossfade_bars=crossfade_bars)
         else:
             self.logger.debug(
-                "Energy alignment successful: fadein_start=%.1fs, duration=%.1fs, curve=%s",
+                "Energy alignment successful: fadeout_start=%.1fs, fadein_start=%.1fs, "
+                "duration=%.1fs, curve=%s",
+                fadeout_start_pos,
                 fadein_start_pos,
                 crossfade_duration,
                 curve_type or "default",
@@ -388,11 +403,24 @@ class SmartCrossFade(SmartFade):
             # Use linear curve for transition, predictable and not too abrupt
             fadein_curve = "linear"
 
+        # Determine the effective end of Song A for EQ and trim calculations.
+        # When energy-aligned, we trim Song A to end at fadeout_start + crossfade_duration
+        # so that acrossfade picks up exactly at the energy knee.
+        fadeout_end_pos: float | None = None
+        if energy_aligned and fadeout_start_pos is not None:
+            fadeout_end_pos = fadeout_start_pos + crossfade_duration
+            fadeout_end_pos = min(fadeout_end_pos, SMART_CROSSFADE_DURATION)
+
         # Create lowpass filter on the outgoing track (unfiltered -> low-pass)
         # Extended lowpass effect to gradually remove bass frequencies
-        fadeout_eq_duration = min(max(crossfade_duration * 2.5, 8.0), SMART_CROSSFADE_DURATION)
-        # The crossfade always happens at the END of the buffer
-        fadeout_eq_start = max(0, SMART_CROSSFADE_DURATION - fadeout_eq_duration)
+        if fadeout_end_pos is not None:
+            # Energy-aligned: EQ sweep ends at the trimmed end of Song A
+            fadeout_eq_duration = min(max(crossfade_duration * 2.5, 8.0), fadeout_end_pos)
+            fadeout_eq_start = max(0, fadeout_end_pos - fadeout_eq_duration)
+        else:
+            fadeout_eq_duration = min(max(crossfade_duration * 2.5, 8.0), SMART_CROSSFADE_DURATION)
+            # The crossfade always happens at the END of the buffer
+            fadeout_eq_start = max(0, SMART_CROSSFADE_DURATION - fadeout_eq_duration)
         fadeout_sweep = FrequencySweepFilter(
             logger=self.logger,
             sweep_type="lowpass",
@@ -422,6 +450,12 @@ class SmartCrossFade(SmartFade):
         )
         self.filters.append(fadein_sweep)
 
+        # Trim Song A's end so acrossfade starts at the energy knee
+        if fadeout_end_pos is not None and fadeout_end_pos < SMART_CROSSFADE_DURATION:
+            self.filters.append(
+                FadeoutTrimFilter(logger=self.logger, fadeout_end_pos=fadeout_end_pos)
+            )
+
         # Add final crossfade filter
         crossfade_filter = CrossfadeFilter(
             logger=self.logger,
@@ -435,7 +469,7 @@ class SmartCrossFade(SmartFade):
             "fadein_entry=%.1fs, duration=%.1fs, curve=%s",
             f"{self.fade_out_bpm:.0f}->{self.fade_in_bpm:.0f}",
             energy_aligned,
-            fadein_start_pos or -1,
+            fadeout_start_pos if fadeout_start_pos is not None else (fadein_start_pos or -1),
             fadein_start_pos or -1,
             crossfade_duration or -1,
             curve_type or "default",
