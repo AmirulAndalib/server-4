@@ -21,7 +21,6 @@ from .analysis_helpers import (
     compute_rms_per_second,
     compute_stft_features,
     detect_key,
-    detect_phrase_boundaries,
 )
 from .feature_extractor import AdvancedBeatFeatureExtractor
 
@@ -237,12 +236,6 @@ class SmartFadesProvider(AudioAnalysisProvider):
             chroma_all = np.concatenate(data.chroma_chunks, axis=0)
             musical_key = detect_key(chroma_all, duration)
 
-        phrase_boundaries = None
-        if energy_curve is not None and spectral_centroid_curve is not None and len(downbeats) >= 4:
-            phrase_boundaries = detect_phrase_boundaries(
-                downbeats, energy_curve, spectral_centroid_curve, bpm,
-            ) or None
-
         analysis = AudioAnalysisData(
             bpm=bpm,
             beats=beats,
@@ -251,7 +244,6 @@ class SmartFadesProvider(AudioAnalysisProvider):
             energy_curve=energy_curve,
             spectral_centroid_curve=spectral_centroid_curve,
             musical_key=musical_key,
-            phrase_boundaries=phrase_boundaries,
         )
 
         await self.mass.music.set_audio_analysis(
@@ -263,14 +255,12 @@ class SmartFadesProvider(AudioAnalysisProvider):
         )
 
         self.logger.info(
-            "Stored beat analysis for %s: BPM=%.1f, %d beats, %d downbeats, "
-            "key=%s, %d phrase boundaries",
+            "Stored beat analysis for %s: BPM=%.1f, %d beats, %d downbeats, key=%s",
             data.item_id,
             bpm,
             len(beats),
             len(downbeats),
             musical_key["root"] + " " + musical_key["mode"] if musical_key else "unknown",
-            len(phrase_boundaries) if phrase_boundaries else 0,
         )
 
     async def cancel(self, session_id: str) -> None:

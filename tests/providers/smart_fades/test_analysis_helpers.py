@@ -7,7 +7,6 @@ from music_assistant.providers.smart_fades.analysis_helpers import (
     compute_rms_per_second,
     compute_stft_features,
     detect_key,
-    detect_phrase_boundaries,
 )
 
 
@@ -126,79 +125,3 @@ def test_detect_key_filters_intro_outro() -> None:
 
     assert key["root"] == "C"
     assert key["mode"] == "major"
-
-
-def test_detect_phrase_boundaries_energy_drop() -> None:
-    """Should detect a phrase boundary at a downbeat with energy drop."""
-    bpm = 120.0
-    bar_duration = 4 * (60.0 / bpm)  # 2.0 seconds per bar
-    downbeats = np.arange(32) * bar_duration
-
-    duration_sec = int(32 * bar_duration)
-    energy = np.ones(duration_sec, dtype=np.float32) * 0.8
-    energy[32:] = 0.2  # Drop at bar 16 (second 32)
-    centroid = np.ones(duration_sec, dtype=np.float32) * 1000.0
-
-    boundaries = detect_phrase_boundaries(downbeats, energy, centroid, bpm)
-
-    boundary_times = [b["time"] for b in boundaries]
-    assert any(abs(t - 32.0) < 2.0 for t in boundary_times), (
-        f"Expected boundary near 32.0s, got {boundary_times}"
-    )
-
-
-def test_detect_phrase_boundaries_spectral_change() -> None:
-    """Should detect a boundary from spectral centroid change even without energy change."""
-    bpm = 120.0
-    bar_duration = 4 * (60.0 / bpm)
-    downbeats = np.arange(32) * bar_duration
-
-    duration_sec = int(32 * bar_duration)
-    energy = np.ones(duration_sec, dtype=np.float32) * 0.5
-    centroid = np.ones(duration_sec, dtype=np.float32) * 500.0
-    centroid[32:] = 2000.0  # Big spectral jump at bar 16
-
-    boundaries = detect_phrase_boundaries(downbeats, energy, centroid, bpm)
-
-    boundary_times = [b["time"] for b in boundaries]
-    assert any(abs(t - 32.0) < 2.0 for t in boundary_times), (
-        f"Expected boundary near 32.0s from spectral change, got {boundary_times}"
-    )
-
-
-def test_detect_phrase_boundaries_too_few_downbeats() -> None:
-    """Should return empty list with fewer than 4 downbeats."""
-    downbeats = np.array([0.0, 2.0, 4.0])
-    energy = np.ones(10, dtype=np.float32)
-    centroid = np.ones(10, dtype=np.float32)
-
-    boundaries = detect_phrase_boundaries(downbeats, energy, centroid, 120.0)
-
-    assert boundaries == []
-
-
-def test_detect_phrase_boundaries_phase_offset() -> None:
-    """Boundaries must be detected even when drop is at a non-modulo-aligned downbeat.
-
-    This test proves the anchor-based approach works: an energy drop at downbeat
-    index 14 (14 % 4 == 2, NOT a multiple of 4) would be completely invisible
-    with a naive i%4==0 gate, but the anchor approach catches it because it
-    scores all downbeats and uses the grid as a bonus, not a gate.
-    """
-    bpm = 120.0
-    bar_duration = 4 * (60.0 / bpm)  # 2.0s per bar
-    downbeats = np.arange(34) * bar_duration
-
-    duration_sec = int(34 * bar_duration)
-    energy = np.ones(duration_sec, dtype=np.float32) * 0.8
-    drop_time = downbeats[14]
-    drop_sec = int(drop_time)
-    energy[drop_sec:] = 0.2
-    centroid = np.ones(duration_sec, dtype=np.float32) * 1000.0
-
-    boundaries = detect_phrase_boundaries(downbeats, energy, centroid, bpm)
-
-    boundary_times = [b["time"] for b in boundaries]
-    assert any(abs(t - drop_time) < 2.0 for t in boundary_times), (
-        f"Expected boundary near {drop_time}s (downbeat 14), got {boundary_times}"
-    )

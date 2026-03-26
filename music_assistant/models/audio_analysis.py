@@ -29,7 +29,6 @@ class AudioAnalysisData(DataClassDictMixin):
     # Extended analysis (populated by smart fades provider)
     energy_curve: npt.NDArray[np.float32] | None = None
     spectral_centroid_curve: npt.NDArray[np.float32] | None = None
-    phrase_boundaries: list[Any] | None = None  # list[PhraseBoundary] at runtime
     musical_key: dict[str, Any] | None = None  # MusicalKey as dict for serialization
 
     class Config(BaseConfig):  # noqa: D106
