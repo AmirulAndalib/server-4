@@ -8,20 +8,15 @@ from typing import TYPE_CHECKING
 
 import aiofiles
 import numpy as np
-import numpy.typing as npt
 import shortuuid
 
 from music_assistant.constants import VERBOSE_LOG_LEVEL
+from music_assistant.controllers.streams.smart_fades.alignment import (
+    AlignmentResult,
+    resolve_alignment,
+)
 from music_assistant.controllers.streams.smart_fades.crossfade_helpers import (
     SMART_CROSSFADE_DURATION,
-    calculate_energy_crossfade_duration,
-    compute_gradual_tempo_steps,
-    extrapolate_downbeats,
-    find_fadein_entry,
-    find_fadeout_start,
-    find_spectral_fadein_entry,
-    find_spectral_fadeout_start,
-    select_crossfade_curve_type,
 )
 from music_assistant.controllers.streams.smart_fades.filters import (
     CrossfadeFilter,
@@ -31,6 +26,11 @@ from music_assistant.controllers.streams.smart_fades.filters import (
     GradualTimeStretchFilter,
     TimeStretchFilter,
     TrimFilter,
+)
+from music_assistant.controllers.streams.smart_fades.time_stretch import (
+    TimeStretchDecision,
+    compensate_for_stretch,
+    resolve_time_stretch,
 )
 from music_assistant.helpers.process import communicate
 from music_assistant.helpers.util import remove_file
@@ -189,662 +189,166 @@ class SmartCrossFade(SmartFade):
             or fade_in_analysis.beats is None
         ):
             raise ValueError("AudioAnalysisData must have bpm and beats set for smart crossfade")
-        self.fade_out_bpm: float = fade_out_analysis.bpm
-        self.fade_in_bpm: float = fade_in_analysis.bpm
-        self.fade_out_beats: npt.NDArray[np.float64] = fade_out_analysis.beats
-        self.fade_in_beats: npt.NDArray[np.float64] = fade_in_analysis.beats
-        self.fade_out_downbeats: npt.NDArray[np.float64] = (
-            fade_out_analysis.downbeats if fade_out_analysis.downbeats is not None else np.array([])
-        )
-        self.fade_in_downbeats: npt.NDArray[np.float64] = (
-            fade_in_analysis.downbeats if fade_in_analysis.downbeats is not None else np.array([])
-        )
-        # Energy curves for energy-contour alignment (may be None)
-        self.fade_out_energy: npt.NDArray[np.float32] | None = fade_out_analysis.energy_curve
-        self.fade_in_energy: npt.NDArray[np.float32] | None = fade_in_analysis.energy_curve
-        # Spectral centroid curves for spectral fallback alignment (may be None)
-        self.fade_out_spectral: npt.NDArray[np.float32] | None = (
-            fade_out_analysis.spectral_centroid_curve
-        )
-        self.fade_in_spectral: npt.NDArray[np.float32] | None = (
-            fade_in_analysis.spectral_centroid_curve
-        )
-        self.fade_out_duration: float = fade_out_analysis.duration or 0.0
-        self.fade_in_duration: float = fade_in_analysis.duration or 0.0
+        self.fade_out_analysis = fade_out_analysis
+        self.fade_in_analysis = fade_in_analysis
         super().__init__(logger)
 
-    def _try_energy_alignment(
-        self,
-    ) -> tuple[bool, float | None, float | None, float, str | None, npt.NDArray[np.float64]]:
-        """Attempt energy-contour alignment for crossfade parameters.
-
-        :return: Tuple of (energy_aligned, fadeout_start_pos, fadein_start_pos,
-                 crossfade_duration, curve_type, fadeout_downbeats_rel).
-        """
-        empty_downbeats: npt.NDArray[np.float64] = np.array([])
-        if self.fade_out_energy is None or self.fade_in_energy is None:
-            self.logger.debug(
-                "Energy alignment skipped: fade_out_energy=%s, fade_in_energy=%s",
-                "present" if self.fade_out_energy is not None else "None",
-                "present" if self.fade_in_energy is not None else "None",
-            )
-            return False, None, None, 0.0, None, empty_downbeats
-
-        buffer_secs = min(SMART_CROSSFADE_DURATION, int(self.fade_out_duration))
-        energy_out = (
-            self.fade_out_energy[-buffer_secs:] if buffer_secs > 0 else self.fade_out_energy
-        )
-        energy_in = self.fade_in_energy[:SMART_CROSSFADE_DURATION]
-
-        # Buffer-relative downbeats for fade-out
-        outro_start = max(0.0, self.fade_out_duration - SMART_CROSSFADE_DURATION)
-        out_db_mask = self.fade_out_downbeats >= outro_start
-        fadeout_downbeats_rel = self.fade_out_downbeats[out_db_mask] - outro_start
-
-        # Fade-in downbeats are already 0-relative
-        fadein_downbeats_rel = self.fade_in_downbeats[
-            self.fade_in_downbeats < SMART_CROSSFADE_DURATION
-        ]
-
-        self.logger.debug(
-            "Energy alignment attempt: energy_out=%d values (range %.2f-%.2f), "
-            "energy_in=%d values (range %.2f-%.2f), "
-            "fadeout_downbeats=%d, fadein_downbeats=%d",
-            len(energy_out),
-            float(energy_out.min()) if len(energy_out) > 0 else 0,
-            float(energy_out.max()) if len(energy_out) > 0 else 0,
-            len(energy_in),
-            float(energy_in.min()) if len(energy_in) > 0 else 0,
-            float(energy_in.max()) if len(energy_in) > 0 else 0,
-            len(fadeout_downbeats_rel),
-            len(fadein_downbeats_rel),
-        )
-
-        fadeout_start = find_fadeout_start(energy_out, fadeout_downbeats_rel, bpm=self.fade_out_bpm)
-        fadein_entry = find_fadein_entry(energy_in, fadein_downbeats_rel)
-
-        if fadeout_start is None or fadein_entry is None:
-            self.logger.debug(
-                "Energy alignment failed: fadeout_start=%s, fadein_entry=%s",
-                f"{fadeout_start:.1f}s" if fadeout_start is not None else "None (no clear decline)",
-                f"{fadein_entry:.1f}s" if fadein_entry is not None else "None (no clear build)",
-            )
-            return False, None, None, 0.0, None, fadeout_downbeats_rel
-
-        crossfade_duration = calculate_energy_crossfade_duration(
-            energy_out=energy_out,
-            fadeout_start=int(fadeout_start),
-            energy_in=energy_in,
-            fadein_entry=int(fadein_entry),
-            bpm=self.fade_in_bpm,
-        )
-        # Select curve type based on energy slopes in overlap region
-        curve_type: str | None = None
-        overlap_out = energy_out[int(fadeout_start) : int(fadeout_start) + int(crossfade_duration)]
-        overlap_in = energy_in[int(fadein_entry) : int(fadein_entry) + int(crossfade_duration)]
-        if len(overlap_out) > 1 and len(overlap_in) > 1:
-            curve_type = select_crossfade_curve_type(overlap_out, overlap_in)
-
-        return (
-            True,
-            fadeout_start,
-            fadein_entry,
-            crossfade_duration,
-            curve_type,
-            fadeout_downbeats_rel,
-        )
-
-    def _try_spectral_alignment(
-        self,
-    ) -> tuple[bool, float | None, float | None, float, str | None, npt.NDArray[np.float64]]:
-        """Attempt spectral-centroid alignment as fallback when energy alignment fails.
-
-        Uses the same knee-detection approach as energy alignment but on the
-        spectral centroid curve (brightness), which often shows clear decline/rise
-        patterns even when RMS energy is flat (e.g., hi-hats dropping out while
-        kick keeps pumping).
-
-        :return: Tuple of (spectral_aligned, fadeout_start_pos, fadein_start_pos,
-                 crossfade_duration, curve_type, fadeout_downbeats_rel).
-        """
-        empty_downbeats: npt.NDArray[np.float64] = np.array([])
-        if self.fade_out_spectral is None or self.fade_in_spectral is None:
-            self.logger.debug(
-                "Spectral alignment skipped: fade_out_spectral=%s, fade_in_spectral=%s",
-                "present" if self.fade_out_spectral is not None else "None",
-                "present" if self.fade_in_spectral is not None else "None",
-            )
-            return False, None, None, 0.0, None, empty_downbeats
-
-        buffer_secs = min(SMART_CROSSFADE_DURATION, int(self.fade_out_duration))
-        spectral_out = (
-            self.fade_out_spectral[-buffer_secs:] if buffer_secs > 0 else self.fade_out_spectral
-        )
-        spectral_in = self.fade_in_spectral[:SMART_CROSSFADE_DURATION]
-
-        # Buffer-relative downbeats (same extraction as energy alignment)
-        outro_start = max(0.0, self.fade_out_duration - SMART_CROSSFADE_DURATION)
-        out_db_mask = self.fade_out_downbeats >= outro_start
-        fadeout_downbeats_rel = self.fade_out_downbeats[out_db_mask] - outro_start
-        fadein_downbeats_rel = self.fade_in_downbeats[
-            self.fade_in_downbeats < SMART_CROSSFADE_DURATION
-        ]
-
-        self.logger.debug(
-            "Spectral alignment attempt: spectral_out=%d values, spectral_in=%d values",
-            len(spectral_out),
-            len(spectral_in),
-        )
-
-        fadeout_start = find_spectral_fadeout_start(
-            spectral_out, fadeout_downbeats_rel, bpm=self.fade_out_bpm
-        )
-        fadein_entry = find_spectral_fadein_entry(spectral_in, fadein_downbeats_rel)
-
-        if fadeout_start is None or fadein_entry is None:
-            self.logger.debug(
-                "Spectral alignment failed: fadeout_start=%s, fadein_entry=%s",
-                f"{fadeout_start:.1f}s" if fadeout_start is not None else "None",
-                f"{fadein_entry:.1f}s" if fadein_entry is not None else "None",
-            )
-            return False, None, None, 0.0, None, fadeout_downbeats_rel
-
-        # Use energy-based duration if energy curves available, else BPM-scaled bars
-        if self.fade_out_energy is not None and self.fade_in_energy is not None:
-            energy_out = (
-                self.fade_out_energy[-buffer_secs:] if buffer_secs > 0 else self.fade_out_energy
-            )
-            energy_in = self.fade_in_energy[:SMART_CROSSFADE_DURATION]
-            crossfade_duration = calculate_energy_crossfade_duration(
-                energy_out=energy_out,
-                fadeout_start=int(fadeout_start),
-                energy_in=energy_in,
-                fadein_entry=int(fadein_entry),
-                bpm=self.fade_in_bpm,
-            )
-        else:
-            bar_duration = 4.0 * (60.0 / self.fade_in_bpm)
-            if self.fade_in_bpm < 100:
-                bars = 8
-            elif self.fade_in_bpm < 140:
-                bars = 12
-            else:
-                bars = 16
-            crossfade_duration = bars * bar_duration
-
-        self.logger.debug(
-            "Spectral alignment successful: fadeout_start=%.1fs, fadein_start=%.1fs, "
-            "duration=%.1fs",
-            fadeout_start,
-            fadein_entry,
-            crossfade_duration,
-        )
-        return (
-            True,
-            fadeout_start,
-            fadein_entry,
-            crossfade_duration,
-            "qsin",  # Default to equal-power for spectral-only alignment
-            fadeout_downbeats_rel,
-        )
-
-    def _build(self) -> None:  # noqa: PLR0915
+    def _build(self) -> None:
         """Build the smart fades filter chain."""
-        # Calculate tempo factor for time stretching
-        bpm_ratio = self.fade_in_bpm / self.fade_out_bpm
-        bpm_diff_percent = abs(1.0 - bpm_ratio) * 100
-
-        # Extrapolate downbeats for better bar calculation
-        self.extrapolated_fadeout_downbeats = extrapolate_downbeats(
-            self.fade_out_downbeats,
-            tempo_factor=1.0,
-            bpm=self.fade_out_bpm,
+        alignment = resolve_alignment(
+            fade_out_analysis=self.fade_out_analysis,
+            fade_in_analysis=self.fade_in_analysis,
+            logger=self.logger,
         )
 
-        self.logger.log(
-            VERBOSE_LOG_LEVEL,
-            "SmartCrossFade build: fade_out_bpm=%.1f (%d beats), fade_in_bpm=%.1f (%d beats)",
-            self.fade_out_bpm,
-            len(self.fade_out_beats),
-            self.fade_in_bpm,
-            len(self.fade_in_beats),
+        stretch = resolve_time_stretch(
+            fade_out_analysis=self.fade_out_analysis,
+            fade_in_analysis=self.fade_in_analysis,
+            alignment=alignment,
+            threshold_percent=self.time_stretch_bpm_percentage_threshold,
+            logger=self.logger,
         )
 
-        # === Energy-contour alignment (preferred path) ===
-        (
-            energy_aligned,
-            fadeout_start_pos,
-            fadein_start_pos,
-            crossfade_duration,
-            curve_type,
-            fadeout_downbeats_rel,
-        ) = self._try_energy_alignment()
-        crossfade_bars: int = 0
+        alignment = compensate_for_stretch(alignment, stretch)
 
-        if energy_aligned:
-            crossfade_duration = self._clamp_duration_by_bpm(
-                crossfade_duration, bpm_diff_percent, "energy"
-            )
-
-        # Track which strategy was used for logging
-        alignment_strategy = "energy" if energy_aligned else "none"
-
-        # === Spectral-centroid fallback (when energy alignment fails) ===
-        if not energy_aligned:
+        if stretch.apply:
             self.logger.debug(
-                "Energy alignment failed, trying spectral-centroid alignment",
+                "Adjusted energy fadeout_start for time stretch: %.1fs (ratio=%.4f)",
+                alignment.fadeout_start_pos or -1,
+                stretch.bpm_ratio,
             )
-            (
-                spectral_aligned,
-                fadeout_start_pos,
-                fadein_start_pos,
-                crossfade_duration,
-                curve_type,
-                fadeout_downbeats_rel,
-            ) = self._try_spectral_alignment()
-            if spectral_aligned:
-                energy_aligned = True  # reuse downstream path (filter chain)
-                alignment_strategy = "spectral"
-                crossfade_duration = self._clamp_duration_by_bpm(
-                    crossfade_duration, bpm_diff_percent, "spectral"
-                )
 
-        # === Fallback: bar-counting approach ===
-        if not energy_aligned:
-            alignment_strategy = "bar_count"
-            self.logger.debug(
-                "Energy and spectral alignment failed, falling back to beat/tempo-based alignment "
-                "(BPM diff=%.1f%%, bpm_ratio=%.3f)",
-                bpm_diff_percent,
-                bpm_ratio,
-            )
-            crossfade_bars = self._calculate_optimal_crossfade_bars()
-            fadein_start_pos = self._calculate_optimal_fade_timing(crossfade_bars)
-            crossfade_duration = self._calculate_crossfade_duration(crossfade_bars=crossfade_bars)
+        self._build_filters(alignment, stretch)
 
-        self.logger.debug(
-            "Crossfade positioning resolved via %s: fadeout_start=%.1fs, "
-            "fadein_start=%.1fs, duration=%.1fs, curve=%s",
-            alignment_strategy,
-            fadeout_start_pos if fadeout_start_pos is not None else -1,
-            fadein_start_pos if fadein_start_pos is not None else -1,
-            crossfade_duration,
-            curve_type or "default",
+        self.logger.info(
+            "Smart crossfade: %s BPM, strategy=%s, fadeout_start=%.1fs, "
+            "fadein_entry=%.1fs, duration=%.1fs, curve=%s",
+            f"{self.fade_out_analysis.bpm:.0f}->{self.fade_in_analysis.bpm:.0f}",
+            alignment.strategy,
+            alignment.fadeout_start_pos if alignment.fadeout_start_pos is not None else -1,
+            alignment.fadein_start_pos or -1,
+            alignment.crossfade_duration or -1,
+            alignment.curve_type or "default",
         )
-        # === Build filter chain ===
 
-        # Add time stretch filter if needed
-        if 0.1 < bpm_diff_percent <= self.time_stretch_bpm_percentage_threshold and (
-            crossfade_bars > 4 or energy_aligned
-        ):
-            # Use beat-level stepping for >3% BPM diff (more steps = smoother ramp)
-            # Use downbeat-level stepping for <=3% (fewer steps sufficient)
-            if bpm_diff_percent > 3.0:
-                stretch_timestamps = (
-                    self.fade_out_beats[self.fade_out_beats < SMART_CROSSFADE_DURATION]
-                    if not energy_aligned
-                    else self.fade_out_beats[
-                        self.fade_out_beats
-                        >= max(0, self.fade_out_duration - SMART_CROSSFADE_DURATION)
-                    ]
-                    - max(0, self.fade_out_duration - SMART_CROSSFADE_DURATION)
-                )
+    def _build_filters(
+        self, alignment: AlignmentResult, stretch: TimeStretchDecision
+    ) -> None:
+        """Construct the filter chain from alignment and stretch decisions.
+
+        :param alignment: Resolved and compensated alignment result.
+        :param stretch: Time-stretch decision.
+        """
+        energy_aligned = alignment.strategy in ("energy", "spectral")
+        fade_out_bpm = self.fade_out_analysis.bpm or 120.0
+        fade_in_bpm = self.fade_in_analysis.bpm or 120.0
+
+        # Time stretch filter
+        if stretch.apply:
+            if stretch.tempo_steps:
+                self.filters.append(GradualTimeStretchFilter(self.logger, stretch.tempo_steps))
             else:
-                stretch_timestamps = (
-                    fadeout_downbeats_rel if energy_aligned else self.fade_out_downbeats
+                self.filters.append(
+                    TimeStretchFilter(logger=self.logger, stretch_ratio=stretch.bpm_ratio)
                 )
 
-            if bpm_diff_percent > 0.5 and len(stretch_timestamps) >= 4:
-                tempo_steps = compute_gradual_tempo_steps(
-                    start_ratio=1.0,
-                    end_ratio=bpm_ratio,
-                    downbeats=stretch_timestamps,
-                )
-                if tempo_steps:
-                    self.filters.append(GradualTimeStretchFilter(self.logger, tempo_steps))
-                else:
-                    self.filters.append(
-                        TimeStretchFilter(logger=self.logger, stretch_ratio=bpm_ratio)
-                    )
-            else:
-                self.filters.append(TimeStretchFilter(logger=self.logger, stretch_ratio=bpm_ratio))
-            # Re-extrapolate downbeats with actual tempo factor for time-stretched audio
-            self.extrapolated_fadeout_downbeats = extrapolate_downbeats(
-                self.fade_out_downbeats,
-                tempo_factor=bpm_ratio,
-                bpm=self.fade_out_bpm,
-            )
-
-            # Compensate energy-aligned fadeout position for time stretch.
-            # The fadeout_start_pos was computed from the unstretched energy curve
-            # but will be applied to post-stretch audio. When bpm_ratio < 1.0
-            # (slowing down), audio gets longer, so positions shift forward.
-            # Note: fadein_start_pos is for Song B which is NOT stretched.
-            # Note: crossfade_duration is kept in Song B's time domain (unscaled)
-            # since acrossfade uses a single duration for both streams and Song B's
-            # alignment matters more (it's the track the listener transitions into).
-            if energy_aligned and fadeout_start_pos is not None:
-                fadeout_start_pos = fadeout_start_pos / bpm_ratio
-                self.logger.debug(
-                    "Adjusted energy fadeout_start for time stretch: %.1fs (ratio=%.4f)",
-                    fadeout_start_pos,
-                    bpm_ratio,
-                )
-
+        # Beat alignment trim
         if (
-            fadein_start_pos is not None
-            and fadein_start_pos + crossfade_duration <= SMART_CROSSFADE_DURATION
+            alignment.fadein_start_pos is not None
+            and alignment.fadein_start_pos + alignment.crossfade_duration
+            <= SMART_CROSSFADE_DURATION
         ):
-            self.filters.append(TrimFilter(logger=self.logger, fadein_start_pos=fadein_start_pos))
-        else:
+            self.filters.append(
+                TrimFilter(logger=self.logger, fadein_start_pos=alignment.fadein_start_pos)
+            )
+        elif alignment.fadein_start_pos is not None:
             self.logger.log(
                 VERBOSE_LOG_LEVEL,
                 "Skipping beat alignment: not enough audio after trim (%.1fs + %.1fs > %.1fs)",
-                fadein_start_pos,
-                crossfade_duration,
+                alignment.fadein_start_pos,
+                alignment.crossfade_duration,
                 SMART_CROSSFADE_DURATION,
             )
 
-        # Adjust crossfade duration to align with outgoing track's downbeats (fallback path only)
-        if not energy_aligned:
-            crossfade_duration = self._adjust_crossfade_to_downbeats(
-                crossfade_duration=crossfade_duration,
-                fadein_start_pos=fadein_start_pos,
-            )
-
-        # 90 BPM -> 1500Hz, 140 BPM -> 2500Hz
-        avg_bpm = (self.fade_out_bpm + self.fade_in_bpm) / 2
+        # EQ crossover frequency: 90 BPM -> 1500Hz, 140 BPM -> 2500Hz
+        avg_bpm = (fade_out_bpm + fade_in_bpm) / 2
         crossover_freq = int(np.clip(1500 + (avg_bpm - 90) * 20, 1500, 2500))
-
-        # Adjust for BPM mismatch
-        if abs(bpm_ratio - 1.0) > 0.3:
+        if abs(stretch.bpm_ratio - 1.0) > 0.3:
             crossover_freq = int(crossover_freq * 0.85)
 
-        # For shorter fades, use exp/exp curves to avoid abruptness
+        # Determine crossfade_bars for curve selection
+        bar_duration = 4 * (60.0 / fade_in_bpm)
+        crossfade_bars = int(alignment.crossfade_duration / bar_duration) if bar_duration > 0 else 0
+
         if crossfade_bars < 8:
             fadeout_curve = "exponential"
             fadein_curve = "exponential"
-        # For long fades, use log/linear curves
         else:
-            # Use logarithmic curve to give the next track more space
             fadeout_curve = "logarithmic"
-            # Use linear curve for transition, predictable and not too abrupt
             fadein_curve = "linear"
 
-        # Determine the effective end of Song A for EQ and trim calculations.
-        # When energy-aligned, we trim Song A to end at fadeout_start + crossfade_duration
-        # so that acrossfade picks up exactly at the energy knee.
+        # Fadeout end position (energy-aligned path)
         fadeout_end_pos: float | None = None
-        if energy_aligned and fadeout_start_pos is not None:
-            fadeout_end_pos = fadeout_start_pos + crossfade_duration
+        if energy_aligned and alignment.fadeout_start_pos is not None:
+            fadeout_end_pos = alignment.fadeout_start_pos + alignment.crossfade_duration
             fadeout_end_pos = min(fadeout_end_pos, SMART_CROSSFADE_DURATION)
 
-        # Create lowpass filter on the outgoing track (unfiltered -> low-pass)
-        # Extended lowpass effect to gradually remove bass frequencies
+        # Lowpass on outgoing track
         if fadeout_end_pos is not None:
-            # Energy-aligned: EQ sweep ends at the trimmed end of Song A
-            fadeout_eq_duration = min(max(crossfade_duration * 2.5, 8.0), fadeout_end_pos)
+            fadeout_eq_duration = min(
+                max(alignment.crossfade_duration * 2.5, 8.0), fadeout_end_pos
+            )
             fadeout_eq_start = max(0, fadeout_end_pos - fadeout_eq_duration)
         else:
-            fadeout_eq_duration = min(max(crossfade_duration * 2.5, 8.0), SMART_CROSSFADE_DURATION)
-            # The crossfade always happens at the END of the buffer
+            fadeout_eq_duration = min(
+                max(alignment.crossfade_duration * 2.5, 8.0), SMART_CROSSFADE_DURATION
+            )
             fadeout_eq_start = max(0, SMART_CROSSFADE_DURATION - fadeout_eq_duration)
-        fadeout_sweep = FrequencySweepFilter(
-            logger=self.logger,
-            sweep_type="lowpass",
-            target_freq=crossover_freq,
-            duration=fadeout_eq_duration,
-            start_time=fadeout_eq_start,
-            sweep_direction="fade_in",
-            poles=1,
-            curve_type=fadeout_curve,
-            stream_type="fadeout",
-        )
-        self.filters.append(fadeout_sweep)
 
-        # Create high pass filter on the incoming track (high-pass -> unfiltered)
-        # Quicker highpass removal to avoid lingering vocals after crossfade
-        fadein_eq_duration = crossfade_duration / 1.5
-        fadein_sweep = FrequencySweepFilter(
-            logger=self.logger,
-            sweep_type="highpass",
-            target_freq=crossover_freq,
-            duration=fadein_eq_duration,
-            start_time=0,
-            sweep_direction="fade_out",
-            poles=1,
-            curve_type=fadein_curve,
-            stream_type="fadein",
+        self.filters.append(
+            FrequencySweepFilter(
+                logger=self.logger,
+                sweep_type="lowpass",
+                target_freq=crossover_freq,
+                duration=fadeout_eq_duration,
+                start_time=fadeout_eq_start,
+                sweep_direction="fade_in",
+                poles=1,
+                curve_type=fadeout_curve,
+                stream_type="fadeout",
+            )
         )
-        self.filters.append(fadein_sweep)
 
-        # Trim Song A's end so acrossfade starts at the energy knee
+        # Highpass on incoming track
+        fadein_eq_duration = alignment.crossfade_duration / 1.5
+        self.filters.append(
+            FrequencySweepFilter(
+                logger=self.logger,
+                sweep_type="highpass",
+                target_freq=crossover_freq,
+                duration=fadein_eq_duration,
+                start_time=0,
+                sweep_direction="fade_out",
+                poles=1,
+                curve_type=fadein_curve,
+                stream_type="fadein",
+            )
+        )
+
+        # Trim Song A to energy knee
         if fadeout_end_pos is not None and fadeout_end_pos < SMART_CROSSFADE_DURATION:
             self.filters.append(
                 FadeoutTrimFilter(logger=self.logger, fadeout_end_pos=fadeout_end_pos)
             )
 
-        # Add final crossfade filter
-        crossfade_filter = CrossfadeFilter(
-            logger=self.logger,
-            crossfade_duration=crossfade_duration,
-            curve_type=curve_type,
-        )
-        self.filters.append(crossfade_filter)
-
-        self.logger.info(
-            "Smart crossfade: %s BPM, strategy=%s, fadeout_start=%.1fs, "
-            "fadein_entry=%.1fs, duration=%.1fs, curve=%s",
-            f"{self.fade_out_bpm:.0f}->{self.fade_in_bpm:.0f}",
-            alignment_strategy,
-            fadeout_start_pos if fadeout_start_pos is not None else (fadein_start_pos or -1),
-            fadein_start_pos or -1,
-            crossfade_duration or -1,
-            curve_type or "default",
-        )
-
-    def _clamp_duration_by_bpm(
-        self, duration: float, bpm_diff_percent: float, strategy: str
-    ) -> float:
-        """Clamp crossfade duration to a BPM-aware maximum bar count.
-
-        :param duration: Crossfade duration in seconds.
-        :param bpm_diff_percent: BPM difference percentage.
-        :param strategy: Strategy name for logging.
-        """
-        if duration <= 0:
-            return duration
-        bar_duration = 4 * (60.0 / self.fade_in_bpm)
-        if bpm_diff_percent <= 5.0:
-            max_bars = 16
-        elif bpm_diff_percent <= 10.0:
-            max_bars = 12
-        else:
-            max_bars = 4
-        max_duration = max_bars * bar_duration
-        if duration > max_duration:
-            self.logger.debug(
-                "Clamping %s duration from %.1fs to %.1fs (max %d bars at %.1f%% BPM diff)",
-                strategy,
-                duration,
-                max_duration,
-                max_bars,
-                bpm_diff_percent,
+        # Final crossfade
+        self.filters.append(
+            CrossfadeFilter(
+                logger=self.logger,
+                crossfade_duration=alignment.crossfade_duration,
+                curve_type=alignment.curve_type,
             )
-            return max_duration
-        return duration
-
-    def _calculate_crossfade_duration(self, crossfade_bars: int) -> float:
-        """Calculate final crossfade duration based on musical bars and BPM."""
-        # Calculate crossfade duration based on incoming track's BPM
-        beats_per_bar = 4
-        seconds_per_beat = 60.0 / self.fade_in_bpm
-        musical_duration = crossfade_bars * beats_per_bar * seconds_per_beat
-
-        # Apply buffer constraint
-        actual_duration = min(musical_duration, SMART_CROSSFADE_DURATION)
-
-        # Log if we had to constrain the duration
-        if musical_duration > SMART_CROSSFADE_DURATION:
-            self.logger.log(
-                VERBOSE_LOG_LEVEL,
-                "Constraining crossfade duration from %.1fs to %.1fs (buffer limit)",
-                musical_duration,
-                actual_duration,
-            )
-
-        return actual_duration
-
-    def _calculate_optimal_crossfade_bars(self) -> int:
-        """Calculate optimal crossfade bars that fit in available buffer."""
-        bpm_in = self.fade_in_bpm
-        bpm_out = self.fade_out_bpm
-        bpm_diff_percent = abs(1.0 - bpm_in / bpm_out) * 100
-
-        # Calculate ideal bars based on BPM compatibility
-        if bpm_diff_percent <= 5.0:
-            ideal_bars = 10
-        elif bpm_diff_percent <= 10.0:
-            ideal_bars = 6
-        else:
-            ideal_bars = 3
-
-        # Reduce bars until it fits in the fadein buffer
-        for bars in [ideal_bars, 8, 6, 4, 2, 1]:
-            if bars > ideal_bars:
-                continue
-
-            fadein_start_pos = self._calculate_optimal_fade_timing(bars)
-            if fadein_start_pos is None:
-                continue
-
-            # Calculate what the duration would be
-            test_duration = self._calculate_crossfade_duration(crossfade_bars=bars)
-
-            # Check if it fits in fadein buffer
-            fadein_buffer = SMART_CROSSFADE_DURATION - fadein_start_pos
-            if test_duration <= fadein_buffer:
-                if bars < ideal_bars:
-                    self.logger.log(
-                        VERBOSE_LOG_LEVEL,
-                        "Reduced crossfade from %d to %d bars (fadein buffer=%.1fs, needed=%.1fs)",
-                        ideal_bars,
-                        bars,
-                        fadein_buffer,
-                        test_duration,
-                    )
-                return bars
-
-        # Fall back to 1 bar if nothing else fits
-        return 1
-
-    def _calculate_optimal_fade_timing(self, crossfade_bars: int) -> float | None:
-        """Calculate beat positions for alignment."""
-        beats_per_bar = 4
-
-        def calculate_beat_positions(
-            fade_out_beats: npt.NDArray[np.float64],
-            fade_in_beats: npt.NDArray[np.float64],
-            num_beats: int,
-        ) -> float | None:
-            """Calculate start positions from beat arrays."""
-            if len(fade_out_beats) < num_beats or len(fade_in_beats) < num_beats:
-                return None
-
-            fade_in_slice = fade_in_beats[:num_beats]
-            return float(fade_in_slice[0])
-
-        # Try downbeats first for most musical timing
-        downbeat_positions = calculate_beat_positions(
-            self.extrapolated_fadeout_downbeats, self.fade_in_downbeats, crossfade_bars
         )
-        if downbeat_positions:
-            return downbeat_positions
-
-        # Try regular beats if downbeats insufficient
-        required_beats = crossfade_bars * beats_per_bar
-        beat_positions = calculate_beat_positions(
-            self.fade_out_beats, self.fade_in_beats, required_beats
-        )
-        if beat_positions:
-            return beat_positions
-
-        # Fallback: No beat alignment possible
-        self.logger.log(VERBOSE_LOG_LEVEL, "No beat alignment possible (insufficient beats)")
-        return None
-
-    def _adjust_crossfade_to_downbeats(
-        self,
-        crossfade_duration: float,
-        fadein_start_pos: float | None,
-    ) -> float:
-        """Adjust crossfade duration to align with outgoing track's downbeats."""
-        # If we don't have downbeats or beat alignment is disabled, return original duration
-        if len(self.extrapolated_fadeout_downbeats) == 0 or fadein_start_pos is None:
-            return crossfade_duration
-
-        # Calculate where the crossfade would start in the buffer
-        ideal_start_pos = SMART_CROSSFADE_DURATION - crossfade_duration
-
-        # Debug logging
-        self.logger.log(
-            VERBOSE_LOG_LEVEL,
-            "Downbeat adjustment - ideal_start=%.2fs (buffer=%.1fs - crossfade=%.2fs), "
-            "fadein_start=%.2fs",
-            ideal_start_pos,
-            SMART_CROSSFADE_DURATION,
-            crossfade_duration,
-            fadein_start_pos,
-        )
-
-        # Find the closest downbeats (earlier and later)
-        earlier_downbeat = None
-        later_downbeat = None
-
-        for downbeat in self.extrapolated_fadeout_downbeats:
-            if downbeat <= ideal_start_pos:
-                earlier_downbeat = downbeat
-            elif downbeat > ideal_start_pos and later_downbeat is None:
-                later_downbeat = downbeat
-                break
-
-        # Try earlier downbeat first (longer crossfade)
-        if earlier_downbeat is not None:
-            adjusted_duration = float(SMART_CROSSFADE_DURATION - earlier_downbeat)
-            if fadein_start_pos + adjusted_duration <= SMART_CROSSFADE_DURATION:
-                if abs(adjusted_duration - crossfade_duration) > 0.1:
-                    self.logger.log(
-                        VERBOSE_LOG_LEVEL,
-                        "Adjusted crossfade duration from %.2fs to %.2fs to align with "
-                        "downbeat at %.2fs (earlier)",
-                        crossfade_duration,
-                        adjusted_duration,
-                        earlier_downbeat,
-                    )
-                return adjusted_duration
-
-        # Try later downbeat (shorter crossfade)
-        if later_downbeat is not None:
-            adjusted_duration = float(SMART_CROSSFADE_DURATION - later_downbeat)
-            if fadein_start_pos + adjusted_duration <= SMART_CROSSFADE_DURATION:
-                if abs(adjusted_duration - crossfade_duration) > 0.1:
-                    self.logger.log(
-                        VERBOSE_LOG_LEVEL,
-                        "Adjusted crossfade duration from %.2fs to %.2fs to align with "
-                        "downbeat at %.2fs (later)",
-                        crossfade_duration,
-                        adjusted_duration,
-                        later_downbeat,
-                    )
-                return adjusted_duration
-
-        # If no suitable downbeat found, return original duration
-        self.logger.log(
-            VERBOSE_LOG_LEVEL,
-            "Could not adjust crossfade duration to downbeats, using original %.2fs",
-            crossfade_duration,
-        )
-        return crossfade_duration
 
 
 class StandardCrossFade(SmartFade):
