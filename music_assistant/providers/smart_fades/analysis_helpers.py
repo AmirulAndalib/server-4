@@ -7,9 +7,13 @@ for STFT-based features computed directly on pcm_22k blocks.
 
 from __future__ import annotations
 
+import logging
+
 import librosa
 import numpy as np
 import numpy.typing as npt
+
+logger = logging.getLogger(__name__)
 
 
 def compute_rms_per_second(
@@ -164,6 +168,12 @@ def detect_key(
     if mean_chroma.sum() < 1e-10:
         return {"root": "C", "mode": "major", "confidence": 0.0}
 
+    # Log raw chroma distribution before normalization
+    chroma_labels = " ".join(f"{_NOTE_NAMES[i]}={mean_chroma[i]:.3f}" for i in range(12))
+    top_bins = sorted(range(12), key=lambda i: mean_chroma[i], reverse=True)[:4]
+    top_str = ", ".join(f"{_NOTE_NAMES[i]}({mean_chroma[i]:.3f})" for i in top_bins)
+    logger.debug("detect_key: raw chroma=[%s], top 4: %s", chroma_labels, top_str)
+
     # L2-normalize chroma vector for numerical stability
     norm = np.linalg.norm(mean_chroma)
     if norm > 0:
@@ -173,10 +183,13 @@ def detect_key(
     best_root = 0
     best_mode = "major"
 
+    all_scores: list[tuple[float, str, str]] = []
     for shift in range(12):
         rotated = np.roll(mean_chroma, -shift)
         corr_major = float(np.corrcoef(rotated, _KEY_PROFILE_MAJOR)[0, 1])
         corr_minor = float(np.corrcoef(rotated, _KEY_PROFILE_MINOR)[0, 1])
+        all_scores.append((corr_major, _NOTE_NAMES[shift], "major"))
+        all_scores.append((corr_minor, _NOTE_NAMES[shift], "minor"))
         if corr_major > best_corr:
             best_corr = corr_major
             best_root = shift
@@ -185,6 +198,11 @@ def detect_key(
             best_corr = corr_minor
             best_root = shift
             best_mode = "minor"
+
+    # Log top 5 key candidates
+    all_scores.sort(reverse=True)
+    top5 = ", ".join(f"{n} {m}({c:.3f})" for c, n, m in all_scores[:5])
+    logger.debug("detect_key: top 5 candidates: %s", top5)
 
     # Map realistic correlation range [0.3, 0.9] to confidence [0, 1]
     confidence = max(0.0, min(1.0, (best_corr - 0.3) / 0.6))
