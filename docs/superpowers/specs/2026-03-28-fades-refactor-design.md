@@ -46,13 +46,11 @@ def resolve_alignment(
     *,
     fade_out_analysis: AudioAnalysisData,
     fade_in_analysis: AudioAnalysisData,
-    extrapolated_fadeout_downbeats: npt.NDArray[np.float64],
-    buffer_duration: float = SMART_CROSSFADE_DURATION,
     logger: logging.Logger | None = None,
 ) -> AlignmentResult:
 ```
 
-Any derived values (buffer-relative downbeats, energy slices, etc.) are computed internally or via helper functions in `crossfade_helpers.py`.
+Calls `extrapolate_downbeats()` internally to get extrapolated fadeout downbeats. Uses `SMART_CROSSFADE_DURATION` constant directly. Any other derived values (buffer-relative downbeats, energy slices, etc.) are computed internally or via helper functions in `crossfade_helpers.py`.
 
 Internally calls three private functions in order:
 1. `_try_energy_alignment(...)` -> `AlignmentResult | None`
@@ -103,19 +101,23 @@ def resolve_time_stretch(
     fade_out_analysis: AudioAnalysisData,
     fade_in_analysis: AudioAnalysisData,
     alignment: AlignmentResult,
-    threshold_percent: float = 8.0,
-    buffer_duration: float = SMART_CROSSFADE_DURATION,
+    threshold_percent: float = 5.0,
+    stretch_duration: float = 10.0,
     logger: logging.Logger | None = None,
 ) -> TimeStretchDecision:
 ```
 
-BPM ratio, diff percentage, beat/downbeat timestamp selection, and duration are all derived internally from the analysis data.
+Uses `SMART_CROSSFADE_DURATION` constant directly. BPM ratio, diff percentage, beat/downbeat timestamp selection are all derived internally from the analysis data.
+
+Parameters:
+- `threshold_percent`: Maximum BPM difference (%) for which time stretching is applied. Default 5%. SmartCrossFade uses 5%; DJMixFade might use a higher value.
+- `stretch_duration`: How long (in seconds) the gradual tempo ramp takes. Controls aggressiveness: 5% over 5s is aggressive, 5% over 10s is smooth. Default 10s. This is used to select the appropriate number of beat/downbeat steps for the S-curve ramp.
 
 Handles:
 - BPM ratio and diff calculation
 - Threshold check (0.1% < diff <= threshold)
 - Beat-level vs downbeat-level timestamp selection (>3% vs <=3%)
-- Calling `compute_gradual_tempo_steps()` when appropriate
+- Calling `compute_gradual_tempo_steps()` with appropriate timestamps based on `stretch_duration`
 - Returns `TimeStretchDecision` with `apply=False` when stretching is not needed
 
 #### `compensate_for_stretch()` function
@@ -137,12 +139,9 @@ If `stretch.apply` is True and `alignment.fadeout_start_pos` is not None, divide
 
 ```python
 def _build(self) -> None:
-    self.extrapolated_fadeout_downbeats = extrapolate_downbeats(...)
-
     alignment = resolve_alignment(
         fade_out_analysis=self.fade_out_analysis,
         fade_in_analysis=self.fade_in_analysis,
-        extrapolated_fadeout_downbeats=self.extrapolated_fadeout_downbeats,
     )
 
     stretch = resolve_time_stretch(
@@ -265,8 +264,8 @@ DJMixFade gets alignment and stretching for free. Only the filter chain differs.
   - `test_clamp_duration_by_bpm`: various BPM diffs produce correct max bars
   - `test_alignment_result_positions_in_source_time`: positions are not pre-compensated
 - New unit tests for `time_stretch.py`:
-  - `test_resolve_time_stretch_within_threshold`: BPM diff < 8% -> apply=True with steps
-  - `test_resolve_time_stretch_above_threshold`: BPM diff > 8% -> apply=False
+  - `test_resolve_time_stretch_within_threshold`: BPM diff < 5% -> apply=True with steps
+  - `test_resolve_time_stretch_above_threshold`: BPM diff > 5% -> apply=False
   - `test_resolve_time_stretch_negligible_diff`: BPM diff < 0.1% -> apply=False
   - `test_compensate_for_stretch_adjusts_fadeout`: fadeout_start_pos divided by ratio
   - `test_compensate_for_stretch_preserves_fadein`: fadein_start_pos unchanged
