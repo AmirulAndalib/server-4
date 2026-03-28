@@ -35,9 +35,11 @@ class TimeStretchFilter(Filter):
         super().__init__(logger)
 
     def apply(self, input_fadein_label: str, input_fadeout_label: str) -> list[str]:
-        """Create FFmpeg filters to gradually adjust tempo from original BPM to target BPM."""
+        """Create FFmpeg filters to adjust tempo using rubberband."""
         return [
-            f"{input_fadeout_label}atempo={self.stretch_ratio:.6f}[{self.output_fadeout_label}]",
+            f"{input_fadeout_label}rubberband=tempo={self.stretch_ratio:.6f}"
+            f":transients=crisp:detector=compound:pitchq=quality"
+            f"[{self.output_fadeout_label}]",
             f"{input_fadein_label}anull[{self.output_fadein_label}]",  # codespell:ignore anull
         ]
 
@@ -68,13 +70,14 @@ class GradualTimeStretchFilter(Filter):
             self.output_fadein_label = input_fadein_label.strip("[]")
             return []
 
-        cmd_parts = [f"{ts:.3f} atempo tempo {ratio:.6f}" for ts, ratio in self.tempo_steps]
+        cmd_parts = [f"{ts:.3f} rubberband@rb tempo {ratio:.6f}" for ts, ratio in self.tempo_steps]
         cmd_string = "; ".join(cmd_parts)
         initial_ratio = self.tempo_steps[0][1]
 
         return [
             f"{input_fadeout_label} asendcmd=c='{cmd_string}',"
-            f"atempo=tempo={initial_ratio:.6f}"
+            f"rubberband@rb=tempo={initial_ratio:.6f}"
+            f":transients=crisp:detector=compound:pitchq=quality"
             f" [{self.output_fadeout_label}]",
             f"{input_fadein_label} acopy [{self.output_fadein_label}]",
         ]

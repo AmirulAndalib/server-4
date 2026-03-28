@@ -92,20 +92,26 @@ def resolve_time_stretch(
     )
     fade_out_duration = fade_out_analysis.duration or 0.0
 
-    # Select timestamps for S-curve steps:
-    # >3% BPM diff: use beat-level stepping (more steps = smoother)
-    # <=3%: use downbeat-level stepping (fewer steps sufficient)
-    if bpm_diff_percent > 3.0:
-        if energy_aligned:
-            buffer_start = max(0, fade_out_duration - SMART_CROSSFADE_DURATION)
-            stretch_timestamps = fade_out_beats[fade_out_beats >= buffer_start] - buffer_start
-        else:
-            stretch_timestamps = fade_out_beats[fade_out_beats < SMART_CROSSFADE_DURATION]
+    # Compute beat-level timestamps within the stretch window
+    if energy_aligned:
+        buffer_start = max(0, fade_out_duration - SMART_CROSSFADE_DURATION)
+        beat_timestamps = fade_out_beats[fade_out_beats >= buffer_start] - buffer_start
     else:
-        stretch_timestamps = alignment.fadeout_downbeats_rel
+        beat_timestamps = fade_out_beats[fade_out_beats < SMART_CROSSFADE_DURATION]
+    beat_timestamps = beat_timestamps[beat_timestamps <= stretch_duration]
 
-    # Limit timestamps to stretch_duration window
-    stretch_timestamps = stretch_timestamps[stretch_timestamps <= stretch_duration]
+    # Compute downbeat-level timestamps within the stretch window
+    downbeat_timestamps = alignment.fadeout_downbeats_rel
+    downbeat_timestamps = downbeat_timestamps[downbeat_timestamps <= stretch_duration]
+
+    # >3% BPM diff: use beat-level stepping (more steps = smoother)
+    # <=3%: prefer downbeat-level stepping, fall back to beats if too few downbeats
+    if bpm_diff_percent > 3.0:
+        stretch_timestamps = beat_timestamps
+    elif len(downbeat_timestamps) >= 2:
+        stretch_timestamps = downbeat_timestamps
+    else:
+        stretch_timestamps = beat_timestamps
 
     if bpm_diff_percent > 0.5 and len(stretch_timestamps) >= 2:
         tempo_steps = _compute_gradual_tempo_steps(
