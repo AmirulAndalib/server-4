@@ -457,7 +457,7 @@ class MetaDataController(CoreController):
             image_format = _detect_image_format(path)
         if provider == "builtin" and path.startswith("/collage/"):
             # special case for collage images
-            collage_rel = path.split("/collage/")[-1]
+            collage_rel = path.rsplit("/collage/", maxsplit=1)[-1]
             if not is_safe_path(collage_rel):
                 raise FileNotFoundError("Invalid collage path")
             path = os.path.join(self._collage_images_dir, collage_rel)
@@ -766,16 +766,7 @@ class MetaDataController(CoreController):
         # collect metadata + create collage images
         # NOTE: we only do/allow this every REFRESH_INTERVAL
         needs_refresh = (time() - (playlist.metadata.last_refresh or 0)) > REFRESH_INTERVAL
-        self.logger.debug(
-            "DEBUG GENRE: _update_playlist_metadata called for %s, "
-            "force_refresh=%s, needs_refresh=%s, last_refresh=%s",
-            playlist.name,
-            force_refresh,
-            needs_refresh,
-            playlist.metadata.last_refresh,
-        )
         if not (force_refresh or needs_refresh):
-            self.logger.debug("DEBUG GENRE: _update_playlist_metadata skipped - not needed")
             return
         self.logger.debug("Updating metadata for Playlist %s", playlist.name)
         playlist.metadata.genres = set()
@@ -820,17 +811,10 @@ class MetaDataController(CoreController):
             playlist_genres_filtered = {
                 genre for genre, count in playlist_genres.items() if count > min_count
             }
-        top_genres = sorted(playlist_genres_filtered, key=lambda g: playlist_genres[g], reverse=True)
-        playlist.metadata.genres.update(top_genres[:8])
-        self.logger.debug(
-            "DEBUG GENRE: playlist %s - collected %d genre occurrences, "
-            "%d unique genres, %d after filter, final genres: %s",
-            playlist.name,
-            total_genre_occurrences,
-            len(playlist_genres),
-            len(playlist_genres_filtered),
-            playlist.metadata.genres,
+        top_genres = sorted(
+            playlist_genres_filtered, key=lambda g: playlist_genres[g], reverse=True
         )
+        playlist.metadata.genres.update(top_genres[:8])
         # create collage images
         cur_images: list[MediaItemImage] = playlist.metadata.images or []
         new_images = []
@@ -860,18 +844,15 @@ class MetaDataController(CoreController):
         # set timestamp, used to determine when this function was last called
         playlist.metadata.last_refresh = int(time())
         # update final item in library database
-        self.logger.debug(
-            "DEBUG GENRE: saving playlist %s with genres=%s, last_refresh=%s",
-            playlist.name,
-            playlist.metadata.genres,
-            playlist.metadata.last_refresh,
-        )
         await self.mass.music.playlists.update_item_in_library(playlist.item_id, playlist)
 
-    async def save_playlist_genres(
-        self, playlist: Playlist, genre_counts: dict[str, int]
-    ) -> None:
+    async def save_playlist_genres(self, playlist: Playlist, genre_counts: dict[str, int]) -> None:
         """Filter and persist playlist genres from pre-computed counts.
+
+        Called from playlists.tracks() during force_refresh, where genre data
+        is collected inline because track objects only carry genre metadata
+        during the initial provider fetch (subsequent iterations return cached
+        stubs without genre info).
 
         :param playlist: The library playlist to update.
         :param genre_counts: Mapping of genre name to occurrence count.
@@ -886,22 +867,8 @@ class MetaDataController(CoreController):
             filtered = {genre for genre, count in genre_counts.items() if count > min_count}
         top_genres = sorted(filtered, key=lambda g: genre_counts[g], reverse=True)
         new_genres = set(top_genres[:8])
-        self.logger.debug(
-            "DEBUG GENRE: save_playlist_genres for %s - %d occurrences, "
-            "%d unique, %d after filter, final: %s",
-            playlist.name,
-            total,
-            len(genre_counts),
-            len(filtered),
-            new_genres,
-        )
-        # update the playlist's genres in the library database
-        cur_item = await self.mass.music.playlists.get_library_item(int(playlist.item_id))
-        cur_item.metadata.genres = new_genres
-        await self.mass.music.playlists.update_item_in_library(
-            cur_item.item_id, cur_item, overwrite=True
-        )
-        # replace genre mappings so the UI reflects the new genres immediately
+        # replace genre mappings before updating the library item, because the
+        # library update fires MEDIA_ITEM_UPDATED which the UI uses to re-fetch genres
         playlist_id = int(playlist.item_id)
         db = self.mass.music.database
         await db.execute(
@@ -916,6 +883,13 @@ class MetaDataController(CoreController):
                 await genre_controller.add_media_mapping(
                     genre_id, MediaType.PLAYLIST, playlist_id, alias=genre_name
                 )
+        # update the playlist's genres in the library database
+        # this fires MEDIA_ITEM_UPDATED so the UI refreshes with the new mappings
+        cur_item = await self.mass.music.playlists.get_library_item(playlist_id)
+        cur_item.metadata.genres = new_genres
+        await self.mass.music.playlists.update_item_in_library(
+            cur_item.item_id, cur_item, overwrite=True
+        )
 
     async def _update_audiobook_metadata(
         self, audiobook: Audiobook, force_refresh: bool = False
