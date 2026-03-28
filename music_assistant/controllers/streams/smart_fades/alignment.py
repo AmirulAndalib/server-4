@@ -83,7 +83,6 @@ def _extract_buffer_and_downbeats(
     fade_out_analysis: AudioAnalysisData,
     fade_in_analysis: AudioAnalysisData,
 ) -> tuple[
-    float,
     npt.NDArray[np.float64],
     npt.NDArray[np.float64],
 ]:
@@ -91,7 +90,7 @@ def _extract_buffer_and_downbeats(
 
     :param fade_out_analysis: Analysis data for the outgoing track.
     :param fade_in_analysis: Analysis data for the incoming track.
-    :return: Tuple of (outro_start_offset, fadeout_downbeats_rel, fadein_downbeats_rel).
+    :return: Tuple of (fadeout_downbeats_rel, fadein_downbeats_rel).
     """
     fade_out_duration = fade_out_analysis.duration or 0.0
     fade_out_downbeats = (
@@ -107,7 +106,7 @@ def _extract_buffer_and_downbeats(
 
     fadein_downbeats_rel = fade_in_downbeats[fade_in_downbeats < SMART_CROSSFADE_DURATION]
 
-    return outro_start, fadeout_downbeats_rel, fadein_downbeats_rel
+    return fadeout_downbeats_rel, fadein_downbeats_rel
 
 
 def _try_energy_alignment(
@@ -578,7 +577,7 @@ def resolve_alignment(
     :param logger: Optional logger for debug output.
     :return: AlignmentResult with positions in source-audio time.
     """
-    _outro_start, fadeout_downbeats_rel, fadein_downbeats_rel = _extract_buffer_and_downbeats(
+    fadeout_downbeats_rel, fadein_downbeats_rel = _extract_buffer_and_downbeats(
         fade_out_analysis, fade_in_analysis
     )
 
