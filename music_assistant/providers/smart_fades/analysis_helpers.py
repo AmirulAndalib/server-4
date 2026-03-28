@@ -145,14 +145,14 @@ def compute_stft_features(
     )
 
 
-# Albrecht & Shanahan (2013) key profiles — optimized for Pearson-correlation
-# key-finding on a large corpus. Better major/minor discrimination and higher
-# accuracy on pop/rock/electronic than Krumhansl-Schmuckler profiles.
+# Sha'ath key profiles (libKeyFinder / Mixxx) — empirically tuned for
+# Pearson-correlation key-finding on pop, rock, and electronic music.
+# Better genre fit than classical-trained Albrecht-Shanahan profiles.
 _KEY_PROFILE_MAJOR = np.array(
-    [0.238, 0.006, 0.111, 0.006, 0.137, 0.094, 0.016, 0.214, 0.009, 0.080, 0.008, 0.081]
+    [7.24, 3.50, 3.58, 2.85, 5.82, 4.56, 2.45, 6.99, 3.39, 4.56, 4.07, 4.46]
 )
 _KEY_PROFILE_MINOR = np.array(
-    [0.220, 0.006, 0.104, 0.123, 0.019, 0.103, 0.012, 0.214, 0.062, 0.022, 0.061, 0.052]
+    [7.00, 3.14, 4.36, 5.40, 3.67, 4.09, 3.91, 6.20, 3.63, 2.87, 5.35, 3.83]
 )
 _NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
@@ -162,7 +162,7 @@ def detect_key(
     duration: float,  # noqa: ARG001
     energy_per_second: npt.NDArray[np.float32] | None = None,
 ) -> MusicalKeyResult:
-    """Detect musical key using Albrecht-Shanahan profiles with Pearson correlation.
+    """Detect musical key using Sha'ath profiles with Pearson correlation.
 
     Filters out the first and last 10 seconds of chroma data to avoid
     intro/outro skew from ambient pads or sparse instrumentation.
