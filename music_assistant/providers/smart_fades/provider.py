@@ -94,6 +94,7 @@ class SmartFadesData:
     energy_chunks: list[np.ndarray] = field(default_factory=list)
     centroid_chunks: list[np.ndarray] = field(default_factory=list)
     chroma_chunks: list[np.ndarray] = field(default_factory=list)
+    bass_chroma_chunks: list[np.ndarray] = field(default_factory=list)
 
 
 class SmartFadesProvider(AudioAnalysisProvider):
@@ -235,9 +236,16 @@ class SmartFadesProvider(AudioAnalysisProvider):
         musical_key: MusicalKeyResult | None = None
         if data.chroma_chunks:
             chroma_all = np.concatenate(data.chroma_chunks, axis=0)
-            # Pass unnormalized energy for energy-weighted key detection
+            bass_chroma_all = (
+                np.concatenate(data.bass_chroma_chunks, axis=0) if data.bass_chroma_chunks else None
+            )
             raw_energy = np.concatenate(data.energy_chunks) if data.energy_chunks else None
-            musical_key = detect_key(chroma_all, duration, energy_per_second=raw_energy)
+            musical_key = detect_key(
+                chroma_all,
+                duration,
+                energy_per_second=raw_energy,
+                bass_chroma_per_second=bass_chroma_all,
+            )
 
         analysis = AudioAnalysisData(
             bpm=bpm,
@@ -337,7 +345,7 @@ class SmartFadesProvider(AudioAnalysisProvider):
 
         # Extended analysis: spectral centroid + chroma from shared STFT
         if len(pcm_22k) >= 2048:
-            centroid, chroma, _bass_chroma = await asyncio.to_thread(
+            centroid, chroma, bass_chroma = await asyncio.to_thread(
                 compute_stft_features,
                 pcm_22k,
                 ANALYSIS_SAMPLE_RATE,
@@ -346,6 +354,7 @@ class SmartFadesProvider(AudioAnalysisProvider):
                 data.centroid_chunks.append(centroid)
             if len(chroma) > 0:
                 data.chroma_chunks.append(chroma)
+                data.bass_chroma_chunks.append(bass_chroma)
 
     def _run_inference_sync(self, feats: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """Run model inference synchronously. Called from thread pool."""
