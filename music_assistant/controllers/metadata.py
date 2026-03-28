@@ -849,10 +849,10 @@ class MetaDataController(CoreController):
     async def save_playlist_genres(self, playlist: Playlist, genre_counts: dict[str, int]) -> None:
         """Filter and persist playlist genres from pre-computed counts.
 
-        Called from playlists.tracks() during force_refresh. Genre data is
-        collected inline during track iteration because the provider cache
-        returns compact track objects without metadata.genres on subsequent
-        fetches, making a separate re-iteration unreliable.
+        Called from playlists.tracks() during force_refresh. Genres are collected
+        inline during track iteration to avoid a redundant second pass through
+        _update_playlist_metadata, which is throttled and subject to
+        REFRESH_INTERVAL, making it unsuitable for on-demand genre updates.
 
         :param playlist: The library playlist to update.
         :param genre_counts: Mapping of genre name to occurrence count.

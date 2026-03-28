@@ -116,9 +116,9 @@ class PlaylistController(MediaControllerBase[Playlist]):
             provider_instance_id_or_domain, item_id = self._select_provider_id(library_item)
         # playlist tracks are not stored in the db,
         # we always fetched them (cached) from the provider.
-        # Genre collection on force_refresh: collect genres inline during this
-        # iteration because the provider cache returns compact track objects
-        # without metadata.genres populated on subsequent fetches.
+        # Collect genres inline on force_refresh to avoid a redundant second
+        # iteration in _update_playlist_metadata (which is throttled and
+        # subject to REFRESH_INTERVAL, making it unsuitable for on-demand updates).
         genre_counts: dict[str, int] | None = {} if force_refresh else None
         page = 0
         while True:
