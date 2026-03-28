@@ -34,9 +34,6 @@ class TimeStretchDecision:
     tempo_steps: list[tuple[float, float]] | None
 
 
-# === Public interface ===
-
-
 def resolve_time_stretch(
     *,
     fade_out_analysis: AudioAnalysisData,
@@ -153,9 +150,6 @@ def compensate_for_stretch(
         alignment,
         fadeout_start_pos=alignment.fadeout_start_pos / stretch.bpm_ratio,
     )
-
-
-# === Private (called by resolve_time_stretch) ===
 
 
 def _compute_gradual_tempo_steps(

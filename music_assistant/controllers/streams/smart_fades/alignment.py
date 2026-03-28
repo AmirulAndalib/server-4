@@ -22,9 +22,6 @@ from music_assistant.models.audio_analysis import AudioAnalysisData
 
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Constants for signal-based alignment helpers
-# ---------------------------------------------------------------------------
 
 # Smoothing window for energy curve (seconds)
 _SMOOTH_WINDOW = 3
@@ -43,86 +40,384 @@ _SPECTRAL_DECLINE_THRESHOLD = 0.75
 _SPECTRAL_REMAINING_AVG_GUARD = 0.85
 
 
-# ---------------------------------------------------------------------------
-# Signal-based helpers for crossfade alignment
-# ---------------------------------------------------------------------------
+@dataclass
+class AlignmentResult:
+    """Result of crossfade alignment resolution.
 
-
-def _smooth(
-    energy: npt.NDArray[np.float32], window: int = _SMOOTH_WINDOW
-) -> npt.NDArray[np.float32]:
-    """Apply moving average smoothing to energy curve.
-
-    :param energy: Per-second energy values.
-    :param window: Smoothing window in seconds.
-    :return: Smoothed energy curve (same length).
+    All positions are in source-audio time (unstretched).
+    Compensation for time-stretching happens separately via compensate_for_stretch().
     """
-    if len(energy) < window:
-        return energy
-    kernel = np.ones(window, dtype=np.float32) / window
-    return np.convolve(energy, kernel, mode="same").astype(np.float32)
+
+    strategy: str
+    fadeout_start_pos: float | None
+    fadein_start_pos: float | None
+    crossfade_duration: float
+    curve_type: str | None
+    fadeout_downbeats_rel: npt.NDArray[np.float64]
 
 
-def _snap_to_downbeat(
-    target_sec: float,
-    downbeats: npt.NDArray[np.float64],
-    direction: str = "nearest",
-) -> float | None:
-    """Snap a time position to the nearest downbeat.
+def resolve_alignment(
+    *,
+    fade_out_analysis: AudioAnalysisData,
+    fade_in_analysis: AudioAnalysisData,
+    logger: logging.Logger | None = None,
+) -> AlignmentResult:
+    """Resolve crossfade alignment using energy -> spectral -> bar-count cascade.
 
-    :param target_sec: Target time in seconds (buffer-relative).
-    :param downbeats: Downbeat timestamps (buffer-relative).
-    :param direction: 'nearest', 'forward' (at or after), or 'backward' (at or before).
-    :return: Snapped time, or None if no suitable downbeat found.
+    :param fade_out_analysis: Analysis data for the outgoing track.
+    :param fade_in_analysis: Analysis data for the incoming track.
+    :param logger: Optional logger for debug output.
+    :return: AlignmentResult with positions in source-audio time.
     """
-    if len(downbeats) == 0:
+    fadeout_downbeats_rel, fadein_downbeats_rel = _extract_buffer_and_downbeats(
+        fade_out_analysis, fade_in_analysis
+    )
+
+    # 1. Try energy-contour alignment (preferred)
+    result = _try_energy_alignment(
+        fade_out_analysis,
+        fade_in_analysis,
+        fadeout_downbeats_rel,
+        fadein_downbeats_rel,
+        logger,
+    )
+    if result is not None:
+        return result
+
+    # 2. Try spectral-centroid alignment (fallback)
+    if logger:
+        logger.debug("Energy alignment failed, trying spectral-centroid alignment")
+    result = _try_spectral_alignment(
+        fade_out_analysis,
+        fade_in_analysis,
+        fadeout_downbeats_rel,
+        fadein_downbeats_rel,
+        logger,
+    )
+    if result is not None:
+        return result
+
+    # 3. Bar-counting fallback (always succeeds)
+    if logger:
+        logger.debug("Energy and spectral alignment failed, falling back to bar-count alignment")
+    extrapolated = extrapolate_downbeats(
+        fade_out_analysis.downbeats if fade_out_analysis.downbeats is not None else np.array([]),
+        tempo_factor=1.0,
+        bpm=fade_out_analysis.bpm,
+    )
+    return _bar_count_alignment(
+        fade_out_analysis,
+        fade_in_analysis,
+        extrapolated,
+        logger,
+    )
+
+
+def _extract_buffer_and_downbeats(
+    fade_out_analysis: AudioAnalysisData,
+    fade_in_analysis: AudioAnalysisData,
+) -> tuple[
+    npt.NDArray[np.float64],
+    npt.NDArray[np.float64],
+]:
+    """Extract buffer-relative downbeats for both tracks.
+
+    :param fade_out_analysis: Analysis data for the outgoing track.
+    :param fade_in_analysis: Analysis data for the incoming track.
+    :return: Tuple of (fadeout_downbeats_rel, fadein_downbeats_rel).
+    """
+    fade_out_duration = fade_out_analysis.duration or 0.0
+    fade_out_downbeats = (
+        fade_out_analysis.downbeats if fade_out_analysis.downbeats is not None else np.array([])
+    )
+    fade_in_downbeats = (
+        fade_in_analysis.downbeats if fade_in_analysis.downbeats is not None else np.array([])
+    )
+
+    outro_start = max(0.0, fade_out_duration - SMART_CROSSFADE_DURATION)
+    out_db_mask = fade_out_downbeats >= outro_start
+    fadeout_downbeats_rel = fade_out_downbeats[out_db_mask] - outro_start
+
+    fadein_downbeats_rel = fade_in_downbeats[fade_in_downbeats < SMART_CROSSFADE_DURATION]
+
+    return fadeout_downbeats_rel, fadein_downbeats_rel
+
+
+def _try_energy_alignment(
+    fade_out_analysis: AudioAnalysisData,
+    fade_in_analysis: AudioAnalysisData,
+    fadeout_downbeats_rel: npt.NDArray[np.float64],
+    fadein_downbeats_rel: npt.NDArray[np.float64],
+    logger: logging.Logger | None = None,
+) -> AlignmentResult | None:
+    """Attempt energy-contour alignment for crossfade parameters.
+
+    :param fade_out_analysis: Analysis data for the outgoing track.
+    :param fade_in_analysis: Analysis data for the incoming track.
+    :param fadeout_downbeats_rel: Buffer-relative downbeats for Song A.
+    :param fadein_downbeats_rel: Buffer-relative downbeats for Song B.
+    :param logger: Optional logger for debug output.
+    """
+    fade_out_energy = fade_out_analysis.energy_curve
+    fade_in_energy = fade_in_analysis.energy_curve
+    if fade_out_energy is None or fade_in_energy is None:
+        if logger:
+            logger.debug(
+                "Energy alignment skipped: fade_out_energy=%s, fade_in_energy=%s",
+                "present" if fade_out_energy is not None else "None",
+                "present" if fade_in_energy is not None else "None",
+            )
         return None
 
-    if direction == "forward":
-        candidates = downbeats[downbeats >= target_sec - 0.5]
-        return float(candidates[0]) if len(candidates) > 0 else None
-    if direction == "backward":
-        candidates = downbeats[downbeats <= target_sec + 0.5]
-        return float(candidates[-1]) if len(candidates) > 0 else None
-    idx = int(np.argmin(np.abs(downbeats - target_sec)))
-    return float(downbeats[idx])
+    fade_out_duration = fade_out_analysis.duration or 0.0
+    buffer_secs = min(SMART_CROSSFADE_DURATION, int(fade_out_duration))
+    energy_out = fade_out_energy[-buffer_secs:] if buffer_secs > 0 else fade_out_energy
+    energy_in = fade_in_energy[:SMART_CROSSFADE_DURATION]
+
+    if logger:
+        logger.debug(
+            "Energy alignment attempt: energy_out=%d values (range %.2f-%.2f), "
+            "energy_in=%d values (range %.2f-%.2f), "
+            "fadeout_downbeats=%d, fadein_downbeats=%d",
+            len(energy_out),
+            float(energy_out.min()) if len(energy_out) > 0 else 0,
+            float(energy_out.max()) if len(energy_out) > 0 else 0,
+            len(energy_in),
+            float(energy_in.min()) if len(energy_in) > 0 else 0,
+            float(energy_in.max()) if len(energy_in) > 0 else 0,
+            len(fadeout_downbeats_rel),
+            len(fadein_downbeats_rel),
+        )
+
+    fade_out_bpm = fade_out_analysis.bpm or 120.0
+    fade_in_bpm = fade_in_analysis.bpm or 120.0
+
+    fadeout_start = _find_fadeout_start(energy_out, fadeout_downbeats_rel, bpm=fade_out_bpm)
+    fadein_entry = _find_fadein_entry(energy_in, fadein_downbeats_rel)
+
+    if fadeout_start is None or fadein_entry is None:
+        if logger:
+            logger.debug(
+                "Energy alignment failed: fadeout_start=%s, fadein_entry=%s",
+                f"{fadeout_start:.1f}s" if fadeout_start is not None else "None (no clear decline)",
+                f"{fadein_entry:.1f}s" if fadein_entry is not None else "None (no clear build)",
+            )
+        return None
+
+    crossfade_duration = _calculate_energy_crossfade_duration(
+        energy_out=energy_out,
+        fadeout_start=int(fadeout_start),
+        energy_in=energy_in,
+        fadein_entry=int(fadein_entry),
+        bpm=fade_in_bpm,
+    )
+
+    # Select curve type based on energy slopes in overlap region
+    curve_type: str | None = None
+    overlap_out = energy_out[int(fadeout_start) : int(fadeout_start) + int(crossfade_duration)]
+    overlap_in = energy_in[int(fadein_entry) : int(fadein_entry) + int(crossfade_duration)]
+    if len(overlap_out) > 1 and len(overlap_in) > 1:
+        curve_type = _select_crossfade_curve_type(overlap_out, overlap_in)
+
+    bpm_diff_percent = get_bpm_diff_percentage(fade_out_bpm, fade_in_bpm)
+    crossfade_duration = _clamp_duration_by_bpm(
+        crossfade_duration, fade_in_bpm, bpm_diff_percent, logger
+    )
+
+    return AlignmentResult(
+        strategy="energy",
+        fadeout_start_pos=fadeout_start,
+        fadein_start_pos=fadein_entry,
+        crossfade_duration=crossfade_duration,
+        curve_type=curve_type,
+        fadeout_downbeats_rel=fadeout_downbeats_rel,
+    )
 
 
-def _snap_to_phrase_boundary(
-    target_sec: float,
-    downbeats: npt.NDArray[np.float64],
-    phrase_len: int = 8,
-    direction: str = "nearest",
-) -> float | None:
-    """Snap a time position to the nearest phrase boundary.
+def _try_spectral_alignment(
+    fade_out_analysis: AudioAnalysisData,
+    fade_in_analysis: AudioAnalysisData,
+    fadeout_downbeats_rel: npt.NDArray[np.float64],
+    fadein_downbeats_rel: npt.NDArray[np.float64],
+    logger: logging.Logger | None = None,
+) -> AlignmentResult | None:
+    """Attempt spectral-centroid alignment as fallback when energy alignment fails.
 
-    A phrase boundary is every Nth downbeat (default 8 bars). Falls back
-    to 4-bar boundaries if 8-bar snap moves the position too far, and
-    to plain downbeat snapping if too few downbeats are available.
-
-    :param target_sec: Target time in seconds (buffer-relative).
-    :param downbeats: Downbeat timestamps (buffer-relative).
-    :param phrase_len: Number of bars per phrase (default 8).
-    :param direction: 'nearest', 'forward', or 'backward'.
-    :return: Snapped time, or None if no suitable boundary found.
+    :param fade_out_analysis: Analysis data for the outgoing track.
+    :param fade_in_analysis: Analysis data for the incoming track.
+    :param fadeout_downbeats_rel: Buffer-relative downbeats for Song A.
+    :param fadein_downbeats_rel: Buffer-relative downbeats for Song B.
+    :param logger: Optional logger for debug output.
     """
-    if len(downbeats) < phrase_len:
-        return _snap_to_downbeat(target_sec, downbeats, direction)
+    fade_out_spectral = fade_out_analysis.spectral_centroid_curve
+    fade_in_spectral = fade_in_analysis.spectral_centroid_curve
+    if fade_out_spectral is None or fade_in_spectral is None:
+        if logger:
+            logger.debug(
+                "Spectral alignment skipped: fade_out_spectral=%s, fade_in_spectral=%s",
+                "present" if fade_out_spectral is not None else "None",
+                "present" if fade_in_spectral is not None else "None",
+            )
+        return None
 
-    phrase_boundaries = downbeats[::phrase_len]
-    result = _snap_to_downbeat(target_sec, phrase_boundaries, direction)
+    fade_out_duration = fade_out_analysis.duration or 0.0
+    fade_out_bpm = fade_out_analysis.bpm or 120.0
+    fade_in_bpm = fade_in_analysis.bpm or 120.0
 
-    if result is not None and phrase_len == 8 and len(downbeats) >= 4:
-        bar_dur = float(np.median(np.diff(downbeats))) if len(downbeats) > 1 else 2.0
-        if abs(result - target_sec) > 4 * bar_dur:
-            four_bar = _snap_to_downbeat(target_sec, downbeats[::4], direction)
-            if four_bar is not None:
-                return four_bar
+    buffer_secs = min(SMART_CROSSFADE_DURATION, int(fade_out_duration))
+    spectral_out = fade_out_spectral[-buffer_secs:] if buffer_secs > 0 else fade_out_spectral
+    spectral_in = fade_in_spectral[:SMART_CROSSFADE_DURATION]
 
-    return result
+    if logger:
+        logger.debug(
+            "Spectral alignment attempt: spectral_out=%d values, spectral_in=%d values",
+            len(spectral_out),
+            len(spectral_in),
+        )
+
+    fadeout_start = _find_spectral_fadeout_start(
+        spectral_out, fadeout_downbeats_rel, bpm=fade_out_bpm
+    )
+    fadein_entry = _find_spectral_fadein_entry(spectral_in, fadein_downbeats_rel)
+
+    if fadeout_start is None or fadein_entry is None:
+        if logger:
+            logger.debug(
+                "Spectral alignment failed: fadeout_start=%s, fadein_entry=%s",
+                f"{fadeout_start:.1f}s" if fadeout_start is not None else "None",
+                f"{fadein_entry:.1f}s" if fadein_entry is not None else "None",
+            )
+        return None
+
+    # Use energy-based duration if energy curves available, else BPM-scaled bars
+    fade_out_energy = fade_out_analysis.energy_curve
+    fade_in_energy = fade_in_analysis.energy_curve
+    if fade_out_energy is not None and fade_in_energy is not None:
+        energy_out = fade_out_energy[-buffer_secs:] if buffer_secs > 0 else fade_out_energy
+        energy_in = fade_in_energy[:SMART_CROSSFADE_DURATION]
+        crossfade_duration = _calculate_energy_crossfade_duration(
+            energy_out=energy_out,
+            fadeout_start=int(fadeout_start),
+            energy_in=energy_in,
+            fadein_entry=int(fadein_entry),
+            bpm=fade_in_bpm,
+        )
+    else:
+        bar_duration = 4.0 * (60.0 / fade_in_bpm)
+        if fade_in_bpm < 100:
+            bars = 8
+        elif fade_in_bpm < 140:
+            bars = 12
+        else:
+            bars = 16
+        crossfade_duration = bars * bar_duration
+
+    bpm_diff_percent = get_bpm_diff_percentage(fade_out_bpm, fade_in_bpm)
+    crossfade_duration = _clamp_duration_by_bpm(
+        crossfade_duration, fade_in_bpm, bpm_diff_percent, logger
+    )
+
+    if logger:
+        logger.debug(
+            "Spectral alignment successful: fadeout_start=%.1fs, fadein_start=%.1fs, "
+            "duration=%.1fs",
+            fadeout_start,
+            fadein_entry,
+            crossfade_duration,
+        )
+
+    return AlignmentResult(
+        strategy="spectral",
+        fadeout_start_pos=fadeout_start,
+        fadein_start_pos=fadein_entry,
+        crossfade_duration=crossfade_duration,
+        curve_type="qsin",
+        fadeout_downbeats_rel=fadeout_downbeats_rel,
+    )
 
 
-def find_fadeout_start(
+def _bar_count_alignment(
+    fade_out_analysis: AudioAnalysisData,
+    fade_in_analysis: AudioAnalysisData,
+    extrapolated_fadeout_downbeats: npt.NDArray[np.float64],
+    logger: logging.Logger | None = None,
+) -> AlignmentResult:
+    """Fall back to bar-counting alignment when energy/spectral both fail.
+
+    :param fade_out_analysis: Analysis data for the outgoing track.
+    :param fade_in_analysis: Analysis data for the incoming track.
+    :param extrapolated_fadeout_downbeats: Extrapolated downbeats for Song A.
+    :param logger: Optional logger for debug output.
+    """
+    fade_in_bpm = fade_in_analysis.bpm or 120.0
+    fade_out_bpm = fade_out_analysis.bpm or 120.0
+    fade_out_beats = (
+        fade_out_analysis.beats if fade_out_analysis.beats is not None else np.array([])
+    )
+    fade_in_beats = fade_in_analysis.beats if fade_in_analysis.beats is not None else np.array([])
+    fade_in_downbeats = (
+        fade_in_analysis.downbeats if fade_in_analysis.downbeats is not None else np.array([])
+    )
+    fade_out_downbeats = (
+        fade_out_analysis.downbeats if fade_out_analysis.downbeats is not None else np.array([])
+    )
+
+    bpm_diff_percent = get_bpm_diff_percentage(fade_in_bpm, fade_out_bpm)
+
+    if logger:
+        logger.debug(
+            "Bar-count alignment fallback (BPM diff=%.1f%%, bpm_ratio=%.3f)",
+            bpm_diff_percent,
+            fade_in_bpm / fade_out_bpm,
+        )
+
+    crossfade_bars = _calculate_optimal_crossfade_bars(
+        fade_in_bpm=fade_in_bpm,
+        fade_out_bpm=fade_out_bpm,
+        extrapolated_fadeout_downbeats=extrapolated_fadeout_downbeats,
+        fade_in_downbeats=fade_in_downbeats,
+        fade_out_beats=fade_out_beats,
+        fade_in_beats=fade_in_beats,
+        logger=logger,
+    )
+    fadein_start_pos = _calculate_optimal_fade_timing(
+        crossfade_bars=crossfade_bars,
+        extrapolated_fadeout_downbeats=extrapolated_fadeout_downbeats,
+        fade_in_downbeats=fade_in_downbeats,
+        fade_out_beats=fade_out_beats,
+        fade_in_beats=fade_in_beats,
+        logger=logger,
+    )
+    crossfade_duration = _calculate_crossfade_duration(
+        crossfade_bars=crossfade_bars,
+        fade_in_bpm=fade_in_bpm,
+        logger=logger,
+    )
+
+    crossfade_duration = _adjust_crossfade_to_downbeats(
+        crossfade_duration=crossfade_duration,
+        fadein_start_pos=fadein_start_pos,
+        extrapolated_fadeout_downbeats=extrapolated_fadeout_downbeats,
+        logger=logger,
+    )
+
+    # Buffer-relative downbeats for Song A
+    fade_out_duration = fade_out_analysis.duration or 0.0
+    outro_start = max(0.0, fade_out_duration - SMART_CROSSFADE_DURATION)
+    out_db_mask = fade_out_downbeats >= outro_start
+    fadeout_downbeats_rel = fade_out_downbeats[out_db_mask] - outro_start
+
+    return AlignmentResult(
+        strategy="bar_count",
+        fadeout_start_pos=None,
+        fadein_start_pos=fadein_start_pos,
+        crossfade_duration=crossfade_duration,
+        curve_type=None,
+        fadeout_downbeats_rel=fadeout_downbeats_rel,
+    )
+
+
+def _find_fadeout_start(
     energy_tail: npt.NDArray[np.float32],
     downbeats: npt.NDArray[np.float64],
     bpm: float = 120.0,
@@ -217,7 +512,7 @@ def find_fadeout_start(
     return snapped
 
 
-def find_fadein_entry(
+def _find_fadein_entry(
     energy_head: npt.NDArray[np.float32],
     downbeats: npt.NDArray[np.float64],
 ) -> float | None:
@@ -309,7 +604,7 @@ def find_fadein_entry(
     return None
 
 
-def calculate_energy_crossfade_duration(
+def _calculate_energy_crossfade_duration(
     energy_out: npt.NDArray[np.float32],
     fadeout_start: int,
     energy_in: npt.NDArray[np.float32],
@@ -382,7 +677,7 @@ def calculate_energy_crossfade_duration(
     return final_duration
 
 
-def select_crossfade_curve_type(
+def _select_crossfade_curve_type(
     outgoing_energy: npt.NDArray[np.float32],
     incoming_energy: npt.NDArray[np.float32],
 ) -> str:
@@ -407,34 +702,50 @@ def select_crossfade_curve_type(
     return "tri"  # Equal-gain — slopes are divergent
 
 
-# ---------------------------------------------------------------------------
-# Spectral-centroid helpers
-# ---------------------------------------------------------------------------
+def _clamp_duration_by_bpm(
+    duration: float,
+    bpm: float,
+    bpm_diff_percent: float,
+    logger: logging.Logger | None = None,
+) -> float:
+    """Clamp crossfade duration to a BPM-aware maximum bar count.
 
-
-def _normalize_spectral(
-    spectral: npt.NDArray[np.float32],
-) -> npt.NDArray[np.float32]:
-    """Min-max normalize spectral centroid (Hz) to 0-1 within the buffer.
-
-    :param spectral: Per-second spectral centroid values in Hz.
-    :return: Normalized curve (0-1), or ones if range is negligible.
+    :param duration: Crossfade duration in seconds.
+    :param bpm: BPM of the incoming track (used for bar duration).
+    :param bpm_diff_percent: BPM difference percentage between tracks.
+    :param logger: Optional logger for debug output.
     """
-    sc_min = float(spectral.min())
-    sc_range = float(spectral.max()) - sc_min
-    if sc_range < 1.0:
-        return np.ones_like(spectral)
-    return ((spectral - sc_min) / sc_range).astype(np.float32)
+    if duration <= 0:
+        return duration
+    bar_duration = 4 * (60.0 / bpm)
+    if bpm_diff_percent <= 5.0:
+        max_bars = 16
+    elif bpm_diff_percent <= 10.0:
+        max_bars = 12
+    else:
+        max_bars = 4
+    max_duration = max_bars * bar_duration
+    if duration > max_duration:
+        if logger:
+            logger.debug(
+                "Clamping duration from %.1fs to %.1fs (max %d bars at %.1f%% BPM diff)",
+                duration,
+                max_duration,
+                max_bars,
+                bpm_diff_percent,
+            )
+        return max_duration
+    return duration
 
 
-def find_spectral_fadeout_start(
+def _find_spectral_fadeout_start(
     spectral_tail: npt.NDArray[np.float32],
     downbeats: npt.NDArray[np.float64],
     bpm: float = 120.0,
 ) -> float | None:
     """Find where the outgoing track's spectral brightness starts declining.
 
-    Same logic as find_fadeout_start but operates on the spectral centroid
+    Same logic as _find_fadeout_start but operates on the spectral centroid
     curve with wider smoothing and looser thresholds, since spectral centroid
     is noisier and declines more gradually than RMS energy.
 
@@ -511,13 +822,13 @@ def find_spectral_fadeout_start(
     return snapped
 
 
-def find_spectral_fadein_entry(
+def _find_spectral_fadein_entry(
     spectral_head: npt.NDArray[np.float32],
     downbeats: npt.NDArray[np.float64],
 ) -> float | None:
     """Find where the incoming track's spectral brightness begins rising.
 
-    Same logic as find_fadein_entry but operates on the spectral centroid
+    Same logic as _find_fadein_entry but operates on the spectral centroid
     curve with wider smoothing.
 
     :param spectral_head: Per-second spectral centroid for the first ~45s (buffer-relative).
@@ -579,281 +890,6 @@ def find_spectral_fadein_entry(
         len(gradient),
     )
     return None
-
-
-@dataclass
-class AlignmentResult:
-    """Result of crossfade alignment resolution.
-
-    All positions are in source-audio time (unstretched).
-    Compensation for time-stretching happens separately via compensate_for_stretch().
-    """
-
-    strategy: str
-    fadeout_start_pos: float | None
-    fadein_start_pos: float | None
-    crossfade_duration: float
-    curve_type: str | None
-    fadeout_downbeats_rel: npt.NDArray[np.float64]
-
-
-def clamp_duration_by_bpm(
-    duration: float,
-    bpm: float,
-    bpm_diff_percent: float,
-    logger: logging.Logger | None = None,
-) -> float:
-    """Clamp crossfade duration to a BPM-aware maximum bar count.
-
-    :param duration: Crossfade duration in seconds.
-    :param bpm: BPM of the incoming track (used for bar duration).
-    :param bpm_diff_percent: BPM difference percentage between tracks.
-    :param logger: Optional logger for debug output.
-    """
-    if duration <= 0:
-        return duration
-    bar_duration = 4 * (60.0 / bpm)
-    if bpm_diff_percent <= 5.0:
-        max_bars = 16
-    elif bpm_diff_percent <= 10.0:
-        max_bars = 12
-    else:
-        max_bars = 4
-    max_duration = max_bars * bar_duration
-    if duration > max_duration:
-        if logger:
-            logger.debug(
-                "Clamping duration from %.1fs to %.1fs (max %d bars at %.1f%% BPM diff)",
-                duration,
-                max_duration,
-                max_bars,
-                bpm_diff_percent,
-            )
-        return max_duration
-    return duration
-
-
-def _extract_buffer_and_downbeats(
-    fade_out_analysis: AudioAnalysisData,
-    fade_in_analysis: AudioAnalysisData,
-) -> tuple[
-    npt.NDArray[np.float64],
-    npt.NDArray[np.float64],
-]:
-    """Extract buffer-relative downbeats for both tracks.
-
-    :param fade_out_analysis: Analysis data for the outgoing track.
-    :param fade_in_analysis: Analysis data for the incoming track.
-    :return: Tuple of (fadeout_downbeats_rel, fadein_downbeats_rel).
-    """
-    fade_out_duration = fade_out_analysis.duration or 0.0
-    fade_out_downbeats = (
-        fade_out_analysis.downbeats if fade_out_analysis.downbeats is not None else np.array([])
-    )
-    fade_in_downbeats = (
-        fade_in_analysis.downbeats if fade_in_analysis.downbeats is not None else np.array([])
-    )
-
-    outro_start = max(0.0, fade_out_duration - SMART_CROSSFADE_DURATION)
-    out_db_mask = fade_out_downbeats >= outro_start
-    fadeout_downbeats_rel = fade_out_downbeats[out_db_mask] - outro_start
-
-    fadein_downbeats_rel = fade_in_downbeats[fade_in_downbeats < SMART_CROSSFADE_DURATION]
-
-    return fadeout_downbeats_rel, fadein_downbeats_rel
-
-
-def _try_energy_alignment(
-    fade_out_analysis: AudioAnalysisData,
-    fade_in_analysis: AudioAnalysisData,
-    fadeout_downbeats_rel: npt.NDArray[np.float64],
-    fadein_downbeats_rel: npt.NDArray[np.float64],
-    logger: logging.Logger | None = None,
-) -> AlignmentResult | None:
-    """Attempt energy-contour alignment for crossfade parameters.
-
-    :param fade_out_analysis: Analysis data for the outgoing track.
-    :param fade_in_analysis: Analysis data for the incoming track.
-    :param fadeout_downbeats_rel: Buffer-relative downbeats for Song A.
-    :param fadein_downbeats_rel: Buffer-relative downbeats for Song B.
-    :param logger: Optional logger for debug output.
-    """
-    fade_out_energy = fade_out_analysis.energy_curve
-    fade_in_energy = fade_in_analysis.energy_curve
-    if fade_out_energy is None or fade_in_energy is None:
-        if logger:
-            logger.debug(
-                "Energy alignment skipped: fade_out_energy=%s, fade_in_energy=%s",
-                "present" if fade_out_energy is not None else "None",
-                "present" if fade_in_energy is not None else "None",
-            )
-        return None
-
-    fade_out_duration = fade_out_analysis.duration or 0.0
-    buffer_secs = min(SMART_CROSSFADE_DURATION, int(fade_out_duration))
-    energy_out = fade_out_energy[-buffer_secs:] if buffer_secs > 0 else fade_out_energy
-    energy_in = fade_in_energy[:SMART_CROSSFADE_DURATION]
-
-    if logger:
-        logger.debug(
-            "Energy alignment attempt: energy_out=%d values (range %.2f-%.2f), "
-            "energy_in=%d values (range %.2f-%.2f), "
-            "fadeout_downbeats=%d, fadein_downbeats=%d",
-            len(energy_out),
-            float(energy_out.min()) if len(energy_out) > 0 else 0,
-            float(energy_out.max()) if len(energy_out) > 0 else 0,
-            len(energy_in),
-            float(energy_in.min()) if len(energy_in) > 0 else 0,
-            float(energy_in.max()) if len(energy_in) > 0 else 0,
-            len(fadeout_downbeats_rel),
-            len(fadein_downbeats_rel),
-        )
-
-    fade_out_bpm = fade_out_analysis.bpm or 120.0
-    fade_in_bpm = fade_in_analysis.bpm or 120.0
-
-    fadeout_start = find_fadeout_start(energy_out, fadeout_downbeats_rel, bpm=fade_out_bpm)
-    fadein_entry = find_fadein_entry(energy_in, fadein_downbeats_rel)
-
-    if fadeout_start is None or fadein_entry is None:
-        if logger:
-            logger.debug(
-                "Energy alignment failed: fadeout_start=%s, fadein_entry=%s",
-                f"{fadeout_start:.1f}s" if fadeout_start is not None else "None (no clear decline)",
-                f"{fadein_entry:.1f}s" if fadein_entry is not None else "None (no clear build)",
-            )
-        return None
-
-    crossfade_duration = calculate_energy_crossfade_duration(
-        energy_out=energy_out,
-        fadeout_start=int(fadeout_start),
-        energy_in=energy_in,
-        fadein_entry=int(fadein_entry),
-        bpm=fade_in_bpm,
-    )
-
-    # Select curve type based on energy slopes in overlap region
-    curve_type: str | None = None
-    overlap_out = energy_out[int(fadeout_start) : int(fadeout_start) + int(crossfade_duration)]
-    overlap_in = energy_in[int(fadein_entry) : int(fadein_entry) + int(crossfade_duration)]
-    if len(overlap_out) > 1 and len(overlap_in) > 1:
-        curve_type = select_crossfade_curve_type(overlap_out, overlap_in)
-
-    bpm_diff_percent = get_bpm_diff_percentage(fade_out_bpm, fade_in_bpm)
-    crossfade_duration = clamp_duration_by_bpm(
-        crossfade_duration, fade_in_bpm, bpm_diff_percent, logger
-    )
-
-    return AlignmentResult(
-        strategy="energy",
-        fadeout_start_pos=fadeout_start,
-        fadein_start_pos=fadein_entry,
-        crossfade_duration=crossfade_duration,
-        curve_type=curve_type,
-        fadeout_downbeats_rel=fadeout_downbeats_rel,
-    )
-
-
-def _try_spectral_alignment(
-    fade_out_analysis: AudioAnalysisData,
-    fade_in_analysis: AudioAnalysisData,
-    fadeout_downbeats_rel: npt.NDArray[np.float64],
-    fadein_downbeats_rel: npt.NDArray[np.float64],
-    logger: logging.Logger | None = None,
-) -> AlignmentResult | None:
-    """Attempt spectral-centroid alignment as fallback when energy alignment fails.
-
-    :param fade_out_analysis: Analysis data for the outgoing track.
-    :param fade_in_analysis: Analysis data for the incoming track.
-    :param fadeout_downbeats_rel: Buffer-relative downbeats for Song A.
-    :param fadein_downbeats_rel: Buffer-relative downbeats for Song B.
-    :param logger: Optional logger for debug output.
-    """
-    fade_out_spectral = fade_out_analysis.spectral_centroid_curve
-    fade_in_spectral = fade_in_analysis.spectral_centroid_curve
-    if fade_out_spectral is None or fade_in_spectral is None:
-        if logger:
-            logger.debug(
-                "Spectral alignment skipped: fade_out_spectral=%s, fade_in_spectral=%s",
-                "present" if fade_out_spectral is not None else "None",
-                "present" if fade_in_spectral is not None else "None",
-            )
-        return None
-
-    fade_out_duration = fade_out_analysis.duration or 0.0
-    fade_out_bpm = fade_out_analysis.bpm or 120.0
-    fade_in_bpm = fade_in_analysis.bpm or 120.0
-
-    buffer_secs = min(SMART_CROSSFADE_DURATION, int(fade_out_duration))
-    spectral_out = fade_out_spectral[-buffer_secs:] if buffer_secs > 0 else fade_out_spectral
-    spectral_in = fade_in_spectral[:SMART_CROSSFADE_DURATION]
-
-    if logger:
-        logger.debug(
-            "Spectral alignment attempt: spectral_out=%d values, spectral_in=%d values",
-            len(spectral_out),
-            len(spectral_in),
-        )
-
-    fadeout_start = find_spectral_fadeout_start(
-        spectral_out, fadeout_downbeats_rel, bpm=fade_out_bpm
-    )
-    fadein_entry = find_spectral_fadein_entry(spectral_in, fadein_downbeats_rel)
-
-    if fadeout_start is None or fadein_entry is None:
-        if logger:
-            logger.debug(
-                "Spectral alignment failed: fadeout_start=%s, fadein_entry=%s",
-                f"{fadeout_start:.1f}s" if fadeout_start is not None else "None",
-                f"{fadein_entry:.1f}s" if fadein_entry is not None else "None",
-            )
-        return None
-
-    # Use energy-based duration if energy curves available, else BPM-scaled bars
-    fade_out_energy = fade_out_analysis.energy_curve
-    fade_in_energy = fade_in_analysis.energy_curve
-    if fade_out_energy is not None and fade_in_energy is not None:
-        energy_out = fade_out_energy[-buffer_secs:] if buffer_secs > 0 else fade_out_energy
-        energy_in = fade_in_energy[:SMART_CROSSFADE_DURATION]
-        crossfade_duration = calculate_energy_crossfade_duration(
-            energy_out=energy_out,
-            fadeout_start=int(fadeout_start),
-            energy_in=energy_in,
-            fadein_entry=int(fadein_entry),
-            bpm=fade_in_bpm,
-        )
-    else:
-        bar_duration = 4.0 * (60.0 / fade_in_bpm)
-        if fade_in_bpm < 100:
-            bars = 8
-        elif fade_in_bpm < 140:
-            bars = 12
-        else:
-            bars = 16
-        crossfade_duration = bars * bar_duration
-
-    bpm_diff_percent = get_bpm_diff_percentage(fade_out_bpm, fade_in_bpm)
-    crossfade_duration = clamp_duration_by_bpm(
-        crossfade_duration, fade_in_bpm, bpm_diff_percent, logger
-    )
-
-    if logger:
-        logger.debug(
-            "Spectral alignment successful: fadeout_start=%.1fs, fadein_start=%.1fs, "
-            "duration=%.1fs",
-            fadeout_start,
-            fadein_entry,
-            crossfade_duration,
-        )
-
-    return AlignmentResult(
-        strategy="spectral",
-        fadeout_start_pos=fadeout_start,
-        fadein_start_pos=fadein_entry,
-        crossfade_duration=crossfade_duration,
-        curve_type="qsin",
-        fadeout_downbeats_rel=fadeout_downbeats_rel,
-    )
 
 
 def _calculate_optimal_crossfade_bars(
@@ -1037,139 +1073,90 @@ def _adjust_crossfade_to_downbeats(
     return crossfade_duration
 
 
-def _bar_count_alignment(
-    fade_out_analysis: AudioAnalysisData,
-    fade_in_analysis: AudioAnalysisData,
-    extrapolated_fadeout_downbeats: npt.NDArray[np.float64],
-    logger: logging.Logger | None = None,
-) -> AlignmentResult:
-    """Fall back to bar-counting alignment when energy/spectral both fail.
+def _smooth(
+    energy: npt.NDArray[np.float32], window: int = _SMOOTH_WINDOW
+) -> npt.NDArray[np.float32]:
+    """Apply moving average smoothing to energy curve.
 
-    :param fade_out_analysis: Analysis data for the outgoing track.
-    :param fade_in_analysis: Analysis data for the incoming track.
-    :param extrapolated_fadeout_downbeats: Extrapolated downbeats for Song A.
-    :param logger: Optional logger for debug output.
+    :param energy: Per-second energy values.
+    :param window: Smoothing window in seconds.
+    :return: Smoothed energy curve (same length).
     """
-    fade_in_bpm = fade_in_analysis.bpm or 120.0
-    fade_out_bpm = fade_out_analysis.bpm or 120.0
-    fade_out_beats = (
-        fade_out_analysis.beats if fade_out_analysis.beats is not None else np.array([])
-    )
-    fade_in_beats = fade_in_analysis.beats if fade_in_analysis.beats is not None else np.array([])
-    fade_in_downbeats = (
-        fade_in_analysis.downbeats if fade_in_analysis.downbeats is not None else np.array([])
-    )
-    fade_out_downbeats = (
-        fade_out_analysis.downbeats if fade_out_analysis.downbeats is not None else np.array([])
-    )
-
-    bpm_diff_percent = get_bpm_diff_percentage(fade_in_bpm, fade_out_bpm)
-
-    if logger:
-        logger.debug(
-            "Bar-count alignment fallback (BPM diff=%.1f%%, bpm_ratio=%.3f)",
-            bpm_diff_percent,
-            fade_in_bpm / fade_out_bpm,
-        )
-
-    crossfade_bars = _calculate_optimal_crossfade_bars(
-        fade_in_bpm=fade_in_bpm,
-        fade_out_bpm=fade_out_bpm,
-        extrapolated_fadeout_downbeats=extrapolated_fadeout_downbeats,
-        fade_in_downbeats=fade_in_downbeats,
-        fade_out_beats=fade_out_beats,
-        fade_in_beats=fade_in_beats,
-        logger=logger,
-    )
-    fadein_start_pos = _calculate_optimal_fade_timing(
-        crossfade_bars=crossfade_bars,
-        extrapolated_fadeout_downbeats=extrapolated_fadeout_downbeats,
-        fade_in_downbeats=fade_in_downbeats,
-        fade_out_beats=fade_out_beats,
-        fade_in_beats=fade_in_beats,
-        logger=logger,
-    )
-    crossfade_duration = _calculate_crossfade_duration(
-        crossfade_bars=crossfade_bars,
-        fade_in_bpm=fade_in_bpm,
-        logger=logger,
-    )
-
-    crossfade_duration = _adjust_crossfade_to_downbeats(
-        crossfade_duration=crossfade_duration,
-        fadein_start_pos=fadein_start_pos,
-        extrapolated_fadeout_downbeats=extrapolated_fadeout_downbeats,
-        logger=logger,
-    )
-
-    # Buffer-relative downbeats for Song A
-    fade_out_duration = fade_out_analysis.duration or 0.0
-    outro_start = max(0.0, fade_out_duration - SMART_CROSSFADE_DURATION)
-    out_db_mask = fade_out_downbeats >= outro_start
-    fadeout_downbeats_rel = fade_out_downbeats[out_db_mask] - outro_start
-
-    return AlignmentResult(
-        strategy="bar_count",
-        fadeout_start_pos=None,
-        fadein_start_pos=fadein_start_pos,
-        crossfade_duration=crossfade_duration,
-        curve_type=None,
-        fadeout_downbeats_rel=fadeout_downbeats_rel,
-    )
+    if len(energy) < window:
+        return energy
+    kernel = np.ones(window, dtype=np.float32) / window
+    return np.convolve(energy, kernel, mode="same").astype(np.float32)
 
 
-def resolve_alignment(
-    *,
-    fade_out_analysis: AudioAnalysisData,
-    fade_in_analysis: AudioAnalysisData,
-    logger: logging.Logger | None = None,
-) -> AlignmentResult:
-    """Resolve crossfade alignment using energy -> spectral -> bar-count cascade.
+def _snap_to_downbeat(
+    target_sec: float,
+    downbeats: npt.NDArray[np.float64],
+    direction: str = "nearest",
+) -> float | None:
+    """Snap a time position to the nearest downbeat.
 
-    :param fade_out_analysis: Analysis data for the outgoing track.
-    :param fade_in_analysis: Analysis data for the incoming track.
-    :param logger: Optional logger for debug output.
-    :return: AlignmentResult with positions in source-audio time.
+    :param target_sec: Target time in seconds (buffer-relative).
+    :param downbeats: Downbeat timestamps (buffer-relative).
+    :param direction: 'nearest', 'forward' (at or after), or 'backward' (at or before).
+    :return: Snapped time, or None if no suitable downbeat found.
     """
-    fadeout_downbeats_rel, fadein_downbeats_rel = _extract_buffer_and_downbeats(
-        fade_out_analysis, fade_in_analysis
-    )
+    if len(downbeats) == 0:
+        return None
 
-    # 1. Try energy-contour alignment (preferred)
-    result = _try_energy_alignment(
-        fade_out_analysis,
-        fade_in_analysis,
-        fadeout_downbeats_rel,
-        fadein_downbeats_rel,
-        logger,
-    )
-    if result is not None:
-        return result
+    if direction == "forward":
+        candidates = downbeats[downbeats >= target_sec - 0.5]
+        return float(candidates[0]) if len(candidates) > 0 else None
+    if direction == "backward":
+        candidates = downbeats[downbeats <= target_sec + 0.5]
+        return float(candidates[-1]) if len(candidates) > 0 else None
+    idx = int(np.argmin(np.abs(downbeats - target_sec)))
+    return float(downbeats[idx])
 
-    # 2. Try spectral-centroid alignment (fallback)
-    if logger:
-        logger.debug("Energy alignment failed, trying spectral-centroid alignment")
-    result = _try_spectral_alignment(
-        fade_out_analysis,
-        fade_in_analysis,
-        fadeout_downbeats_rel,
-        fadein_downbeats_rel,
-        logger,
-    )
-    if result is not None:
-        return result
 
-    # 3. Bar-counting fallback (always succeeds)
-    if logger:
-        logger.debug("Energy and spectral alignment failed, falling back to bar-count alignment")
-    extrapolated = extrapolate_downbeats(
-        fade_out_analysis.downbeats if fade_out_analysis.downbeats is not None else np.array([]),
-        tempo_factor=1.0,
-        bpm=fade_out_analysis.bpm,
-    )
-    return _bar_count_alignment(
-        fade_out_analysis,
-        fade_in_analysis,
-        extrapolated,
-        logger,
-    )
+def _snap_to_phrase_boundary(
+    target_sec: float,
+    downbeats: npt.NDArray[np.float64],
+    phrase_len: int = 8,
+    direction: str = "nearest",
+) -> float | None:
+    """Snap a time position to the nearest phrase boundary.
+
+    A phrase boundary is every Nth downbeat (default 8 bars). Falls back
+    to 4-bar boundaries if 8-bar snap moves the position too far, and
+    to plain downbeat snapping if too few downbeats are available.
+
+    :param target_sec: Target time in seconds (buffer-relative).
+    :param downbeats: Downbeat timestamps (buffer-relative).
+    :param phrase_len: Number of bars per phrase (default 8).
+    :param direction: 'nearest', 'forward', or 'backward'.
+    :return: Snapped time, or None if no suitable boundary found.
+    """
+    if len(downbeats) < phrase_len:
+        return _snap_to_downbeat(target_sec, downbeats, direction)
+
+    phrase_boundaries = downbeats[::phrase_len]
+    result = _snap_to_downbeat(target_sec, phrase_boundaries, direction)
+
+    if result is not None and phrase_len == 8 and len(downbeats) >= 4:
+        bar_dur = float(np.median(np.diff(downbeats))) if len(downbeats) > 1 else 2.0
+        if abs(result - target_sec) > 4 * bar_dur:
+            four_bar = _snap_to_downbeat(target_sec, downbeats[::4], direction)
+            if four_bar is not None:
+                return four_bar
+
+    return result
+
+
+def _normalize_spectral(
+    spectral: npt.NDArray[np.float32],
+) -> npt.NDArray[np.float32]:
+    """Min-max normalize spectral centroid (Hz) to 0-1 within the buffer.
+
+    :param spectral: Per-second spectral centroid values in Hz.
+    :return: Normalized curve (0-1), or ones if range is negligible.
+    """
+    sc_min = float(spectral.min())
+    sc_range = float(spectral.max()) - sc_min
+    if sc_range < 1.0:
+        return np.ones_like(spectral)
+    return ((spectral - sc_min) / sc_range).astype(np.float32)
