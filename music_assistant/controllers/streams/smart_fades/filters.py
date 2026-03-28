@@ -53,7 +53,7 @@ class GradualTimeStretchFilter(Filter):
     output_fadein_label: str = "fadein_unchanged"
 
     def __init__(self, logger: logging.Logger, tempo_steps: list[tuple[float, float]]) -> None:
-        """Initialize with tempo steps from compute_gradual_tempo_steps.
+        """Initialize with tempo steps from _compute_gradual_tempo_steps.
 
         :param logger: Logger for debug output.
         :param tempo_steps: List of (timestamp_seconds, tempo_ratio) tuples.

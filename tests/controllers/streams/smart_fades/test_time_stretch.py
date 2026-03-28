@@ -5,8 +5,8 @@ import numpy as np
 from music_assistant.controllers.streams.smart_fades.alignment import AlignmentResult
 from music_assistant.controllers.streams.smart_fades.time_stretch import (
     TimeStretchDecision,
+    _compute_gradual_tempo_steps,
     compensate_for_stretch,
-    compute_gradual_tempo_steps,
     resolve_time_stretch,
 )
 from music_assistant.models.audio_analysis import AudioAnalysisData
@@ -150,7 +150,7 @@ def test_compute_gradual_tempo_steps_5_percent() -> None:
     """5% tempo change should produce S-curve steps with max 0.5% per step."""
     downbeats = np.arange(0, 20, 2.0)
 
-    steps = compute_gradual_tempo_steps(
+    steps = _compute_gradual_tempo_steps(
         start_ratio=1.0,
         end_ratio=1.05,
         downbeats=downbeats,
