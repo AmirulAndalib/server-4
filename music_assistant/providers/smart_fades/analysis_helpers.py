@@ -78,12 +78,13 @@ def compute_stft_features(
         hop_length=hop_length,
     )[0]
 
-    # Chroma per frame (12 bins)
-    chroma_per_frame = librosa.feature.chroma_stft(
-        S=stft_matrix,
+    # Chroma per frame via CQT (better harmonic separation than STFT chroma,
+    # consistent tuning across blocks with tuning=0.0)
+    chroma_per_frame = librosa.feature.chroma_cqt(
+        y=pcm,
         sr=sr,
-        n_fft=n_fft,
         hop_length=hop_length,
+        tuning=0.0,
     )  # shape: (12, T_frames)
 
     # Average to per-second
@@ -109,11 +110,14 @@ def compute_stft_features(
     return centroid_per_sec.astype(np.float32), chroma_per_sec.astype(np.float32)
 
 
-_KRUMHANSL_MAJOR = np.array(
-    [6.35, 2.23, 3.48, 2.33, 4.38, 4.09, 2.52, 5.19, 2.39, 3.66, 2.29, 2.88]
+# Albrecht & Shanahan (2013) key profiles — optimized for Pearson-correlation
+# key-finding on a large corpus. Better major/minor discrimination and higher
+# accuracy on pop/rock/electronic than Krumhansl-Schmuckler profiles.
+_KEY_PROFILE_MAJOR = np.array(
+    [0.238, 0.006, 0.111, 0.006, 0.137, 0.094, 0.016, 0.214, 0.009, 0.080, 0.008, 0.081]
 )
-_KRUMHANSL_MINOR = np.array(
-    [6.33, 2.68, 3.52, 5.38, 2.60, 3.53, 2.54, 4.75, 3.98, 2.69, 3.34, 3.17]
+_KEY_PROFILE_MINOR = np.array(
+    [0.220, 0.006, 0.104, 0.123, 0.019, 0.103, 0.012, 0.214, 0.062, 0.022, 0.061, 0.052]
 )
 _NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
@@ -121,14 +125,18 @@ _NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 def detect_key(
     chroma_per_second: npt.NDArray[np.float32],
     duration: float,
+    energy_per_second: npt.NDArray[np.float32] | None = None,
 ) -> dict:
-    """Detect musical key using Krumhansl-Schmuckler algorithm.
+    """Detect musical key using Albrecht-Shanahan profiles with Pearson correlation.
 
     Filters out the first and last 10 seconds of chroma data to avoid
     intro/outro skew from ambient pads or sparse instrumentation.
+    When energy_per_second is provided, weights chroma by RMS energy so
+    loud sections (choruses, drops) contribute more than quiet breakdowns.
 
     :param chroma_per_second: Array of shape (T_seconds, 12) with chroma energy per second.
     :param duration: Total track duration in seconds.
+    :param energy_per_second: Optional RMS energy per second for energy-weighted aggregation.
     :return: Dict with keys 'root', 'mode', 'confidence' (MusicalKey-compatible).
     """
     if len(chroma_per_second) == 0:
@@ -136,13 +144,30 @@ def detect_key(
 
     if len(chroma_per_second) > 20:
         trimmed = chroma_per_second[10:-10]
+        trimmed_energy = energy_per_second[10:-10] if energy_per_second is not None else None
     else:
         trimmed = chroma_per_second
+        trimmed_energy = energy_per_second
 
-    mean_chroma = trimmed.mean(axis=0)
+    # Energy-weighted chroma aggregation: loud sections contribute more
+    if trimmed_energy is not None and len(trimmed_energy) == len(trimmed):
+        weights = trimmed_energy[:, np.newaxis]  # (T, 1) for broadcasting
+        mean_chroma = (trimmed * weights).sum(axis=0)
+        weight_sum = weights.sum()
+        if weight_sum > 0:
+            mean_chroma = mean_chroma / weight_sum
+        else:
+            mean_chroma = trimmed.mean(axis=0)
+    else:
+        mean_chroma = trimmed.mean(axis=0)
 
     if mean_chroma.sum() < 1e-10:
         return {"root": "C", "mode": "major", "confidence": 0.0}
+
+    # L2-normalize chroma vector for numerical stability
+    norm = np.linalg.norm(mean_chroma)
+    if norm > 0:
+        mean_chroma = mean_chroma / norm
 
     best_corr = -2.0
     best_root = 0
@@ -150,8 +175,8 @@ def detect_key(
 
     for shift in range(12):
         rotated = np.roll(mean_chroma, -shift)
-        corr_major = float(np.corrcoef(rotated, _KRUMHANSL_MAJOR)[0, 1])
-        corr_minor = float(np.corrcoef(rotated, _KRUMHANSL_MINOR)[0, 1])
+        corr_major = float(np.corrcoef(rotated, _KEY_PROFILE_MAJOR)[0, 1])
+        corr_minor = float(np.corrcoef(rotated, _KEY_PROFILE_MINOR)[0, 1])
         if corr_major > best_corr:
             best_corr = corr_major
             best_root = shift
@@ -162,7 +187,6 @@ def detect_key(
             best_mode = "minor"
 
     # Map realistic correlation range [0.3, 0.9] to confidence [0, 1]
-    # A correlation of 0.3 (ambiguous) = 0.0, 0.9 (very clear) = 1.0
     confidence = max(0.0, min(1.0, (best_corr - 0.3) / 0.6))
 
     return {

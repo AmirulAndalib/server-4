@@ -234,7 +234,9 @@ class SmartFadesProvider(AudioAnalysisProvider):
         musical_key = None
         if data.chroma_chunks:
             chroma_all = np.concatenate(data.chroma_chunks, axis=0)
-            musical_key = detect_key(chroma_all, duration)
+            # Pass unnormalized energy for energy-weighted key detection
+            raw_energy = np.concatenate(data.energy_chunks) if data.energy_chunks else None
+            musical_key = detect_key(chroma_all, duration, energy_per_second=raw_energy)
 
         analysis = AudioAnalysisData(
             bpm=bpm,
