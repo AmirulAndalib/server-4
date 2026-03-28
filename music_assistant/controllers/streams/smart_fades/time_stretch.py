@@ -107,7 +107,7 @@ def resolve_time_stretch(
     # Limit timestamps to stretch_duration window
     stretch_timestamps = stretch_timestamps[stretch_timestamps <= stretch_duration]
 
-    if bpm_diff_percent > 0.5 and len(stretch_timestamps) >= 4:
+    if bpm_diff_percent > 0.5 and len(stretch_timestamps) >= 2:
         tempo_steps = _compute_gradual_tempo_steps(
             start_ratio=1.0,
             end_ratio=bpm_ratio,
