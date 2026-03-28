@@ -1,4 +1,4 @@
-"""Shared helpers for smart crossfade processing."""
+"""Shared helpers for smart fades."""
 
 from __future__ import annotations
 

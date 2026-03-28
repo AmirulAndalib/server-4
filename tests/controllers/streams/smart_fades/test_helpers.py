@@ -2,7 +2,7 @@
 
 import numpy as np
 
-from music_assistant.controllers.streams.smart_fades.crossfade_helpers import (
+from music_assistant.controllers.streams.smart_fades.helpers import (
     extrapolate_downbeats,
     get_bpm_diff_percentage,
 )

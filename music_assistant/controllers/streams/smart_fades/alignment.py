@@ -13,7 +13,7 @@ import numpy as np
 import numpy.typing as npt
 
 from music_assistant.constants import VERBOSE_LOG_LEVEL
-from music_assistant.controllers.streams.smart_fades.crossfade_helpers import (
+from music_assistant.controllers.streams.smart_fades.helpers import (
     SMART_CROSSFADE_DURATION,
     extrapolate_downbeats,
     get_bpm_diff_percentage,

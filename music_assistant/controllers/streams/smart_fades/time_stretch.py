@@ -13,7 +13,7 @@ import numpy as np
 import numpy.typing as npt
 
 from music_assistant.controllers.streams.smart_fades.alignment import AlignmentResult
-from music_assistant.controllers.streams.smart_fades.crossfade_helpers import (
+from music_assistant.controllers.streams.smart_fades.helpers import (
     SMART_CROSSFADE_DURATION,
     get_bpm_diff_percentage,
 )

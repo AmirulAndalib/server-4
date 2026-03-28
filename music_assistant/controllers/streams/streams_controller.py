@@ -66,7 +66,7 @@ from music_assistant.constants import (
 from music_assistant.controllers.players.helpers import AnnounceData
 from music_assistant.controllers.streams.audio_analysis_controller import AudioAnalysisController
 from music_assistant.controllers.streams.smart_fades import SmartFadesMixer
-from music_assistant.controllers.streams.smart_fades.crossfade_helpers import (
+from music_assistant.controllers.streams.smart_fades.helpers import (
     SMART_CROSSFADE_DURATION,
 )
 from music_assistant.helpers.audio import LOGGER as AUDIO_LOGGER
