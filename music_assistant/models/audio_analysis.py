@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, fields
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import numpy.typing as npt
 from mashumaro import DataClassDictMixin
 from mashumaro.config import BaseConfig
+
+if TYPE_CHECKING:
+    from music_assistant.providers.smart_fades.analysis_helpers import MusicalKeyResult
 
 
 @dataclass(kw_only=True)
@@ -29,7 +32,8 @@ class AudioAnalysisData(DataClassDictMixin):
     # Extended analysis (populated by smart fades provider)
     energy_curve: npt.NDArray[np.float32] | None = None
     spectral_centroid_curve: npt.NDArray[np.float32] | None = None
-    musical_key: dict[str, Any] | None = None  # MusicalKey as dict for serialization
+    # MusicalKey as dict for serialization
+    musical_key: MusicalKeyResult | dict[str, Any] | None = None
 
     class Config(BaseConfig):  # noqa: D106
         serialization_strategy = {

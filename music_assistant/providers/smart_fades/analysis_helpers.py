@@ -8,12 +8,21 @@ for STFT-based features computed directly on pcm_22k blocks.
 from __future__ import annotations
 
 import logging
+from typing import TypedDict, cast
 
 import librosa
 import numpy as np
 import numpy.typing as npt
 
 logger = logging.getLogger(__name__)
+
+
+class MusicalKeyResult(TypedDict):
+    """Return type for detect_key."""
+
+    root: str
+    mode: str
+    confidence: float
 
 
 def compute_rms_per_second(
@@ -34,7 +43,7 @@ def compute_rms_per_second(
         return np.array([], dtype=np.float32)
     trimmed = pcm[: n_full_seconds * sr]
     frames = trimmed.reshape(n_full_seconds, sr)
-    return np.sqrt(np.mean(frames**2, axis=1))
+    return cast("npt.NDArray[np.float32]", np.sqrt(np.mean(frames**2, axis=1)).astype(np.float32))
 
 
 def compute_stft_features(
@@ -42,7 +51,7 @@ def compute_stft_features(
     sr: int = 22050,
     n_fft: int = 2048,
     hop_length: int = 512,
-) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32]]:
+) -> tuple[npt.NDArray[np.float32], npt.NDArray[np.float32], npt.NDArray[np.float32]]:
     """Compute spectral centroid and chroma from a single librosa STFT.
 
     Computes one STFT on the pcm block and derives both features from it.
@@ -55,14 +64,15 @@ def compute_stft_features(
     :param sr: Sample rate in Hz.
     :param n_fft: FFT window size.
     :param hop_length: Hop length between STFT frames.
-    :return: Tuple of (centroid_per_second, chroma_per_second).
+    :return: Tuple of (centroid_per_second, chroma_per_second, bass_chroma_per_second).
              centroid_per_second shape: (T_seconds,)
              chroma_per_second shape: (T_seconds, 12)
+             bass_chroma_per_second shape: (T_seconds, 12)
     """
     if len(pcm) < n_fft:
         empty_centroid = np.array([], dtype=np.float32)
         empty_chroma = np.zeros((0, 12), dtype=np.float32)
-        return empty_centroid, empty_chroma
+        return empty_centroid, empty_chroma, empty_chroma
 
     # Compute STFT once — all features derived from this
     stft_matrix = np.abs(librosa.stft(y=pcm, n_fft=n_fft, hop_length=hop_length, center=True))
@@ -82,13 +92,27 @@ def compute_stft_features(
         hop_length=hop_length,
     )[0]
 
-    # Chroma per frame via CQT (better harmonic separation than STFT chroma,
-    # consistent tuning across blocks with tuning=0.0)
+    # Isolate harmonic content for chroma — removes percussive transients
+    # that inject broadband energy into all chroma bins.
+    # margin=8 is aggressive separation (librosa "enhanced chroma" recipe).
+    pcm_harmonic = librosa.effects.harmonic(pcm, margin=8)
+
+    # Full-range chroma via CQT on harmonic signal
     chroma_per_frame = librosa.feature.chroma_cqt(
-        y=pcm,
+        y=pcm_harmonic,
         sr=sr,
         hop_length=hop_length,
         tuning=0.0,
+    )  # shape: (12, T_frames)
+
+    # Bass-register chroma (C2-B2, ~65-130Hz) for tonic disambiguation
+    bass_chroma_per_frame = librosa.feature.chroma_cqt(
+        y=pcm_harmonic,
+        sr=sr,
+        hop_length=hop_length,
+        tuning=0.0,
+        fmin=librosa.note_to_hz("C2"),
+        n_octaves=1,
     )  # shape: (12, T_frames)
 
     # Average to per-second
@@ -100,7 +124,7 @@ def compute_stft_features(
     if n_full_seconds == 0:
         empty_centroid = np.array([], dtype=np.float32)
         empty_chroma = np.zeros((0, 12), dtype=np.float32)
-        return empty_centroid, empty_chroma
+        return empty_centroid, empty_chroma, empty_chroma
 
     trimmed_centroid = centroid_per_frame[: n_full_seconds * frames_per_sec]
     # Use nanmean to handle silent frames where librosa returns NaN (0/0 in weighted mean)
@@ -111,7 +135,14 @@ def compute_stft_features(
     trimmed_chroma = chroma_per_frame[:, : n_full_seconds * frames_per_sec]
     chroma_per_sec = trimmed_chroma.reshape(12, n_full_seconds, frames_per_sec).mean(axis=2).T
 
-    return centroid_per_sec.astype(np.float32), chroma_per_sec.astype(np.float32)
+    trimmed_bass = bass_chroma_per_frame[:, : n_full_seconds * frames_per_sec]
+    bass_chroma_per_sec = trimmed_bass.reshape(12, n_full_seconds, frames_per_sec).mean(axis=2).T
+
+    return (
+        centroid_per_sec.astype(np.float32),
+        chroma_per_sec.astype(np.float32),
+        bass_chroma_per_sec.astype(np.float32),
+    )
 
 
 # Albrecht & Shanahan (2013) key profiles — optimized for Pearson-correlation
@@ -128,9 +159,9 @@ _NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
 def detect_key(
     chroma_per_second: npt.NDArray[np.float32],
-    duration: float,
+    duration: float,  # noqa: ARG001
     energy_per_second: npt.NDArray[np.float32] | None = None,
-) -> dict:
+) -> MusicalKeyResult:
     """Detect musical key using Albrecht-Shanahan profiles with Pearson correlation.
 
     Filters out the first and last 10 seconds of chroma data to avoid
@@ -158,10 +189,7 @@ def detect_key(
         weights = trimmed_energy[:, np.newaxis]  # (T, 1) for broadcasting
         mean_chroma = (trimmed * weights).sum(axis=0)
         weight_sum = weights.sum()
-        if weight_sum > 0:
-            mean_chroma = mean_chroma / weight_sum
-        else:
-            mean_chroma = trimmed.mean(axis=0)
+        mean_chroma = mean_chroma / weight_sum if weight_sum > 0 else trimmed.mean(axis=0)
     else:
         mean_chroma = trimmed.mean(axis=0)
 

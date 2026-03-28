@@ -18,6 +18,7 @@ from music_assistant.models.audio_analysis import AudioAnalysisData
 from music_assistant.models.audio_analysis_provider import AudioAnalysisProvider
 
 from .analysis_helpers import (
+    MusicalKeyResult,
     compute_rms_per_second,
     compute_stft_features,
     detect_key,
@@ -231,7 +232,7 @@ class SmartFadesProvider(AudioAnalysisProvider):
         if data.centroid_chunks:
             spectral_centroid_curve = np.concatenate(data.centroid_chunks)
 
-        musical_key = None
+        musical_key: MusicalKeyResult | None = None
         if data.chroma_chunks:
             chroma_all = np.concatenate(data.chroma_chunks, axis=0)
             # Pass unnormalized energy for energy-weighted key detection
@@ -336,7 +337,7 @@ class SmartFadesProvider(AudioAnalysisProvider):
 
         # Extended analysis: spectral centroid + chroma from shared STFT
         if len(pcm_22k) >= 2048:
-            centroid, chroma = await asyncio.to_thread(
+            centroid, chroma, _bass_chroma = await asyncio.to_thread(
                 compute_stft_features,
                 pcm_22k,
                 ANALYSIS_SAMPLE_RATE,

@@ -54,7 +54,7 @@ def test_compute_stft_features_sine_wave() -> None:
     t = np.linspace(0, duration, sr * duration, endpoint=False, dtype=np.float32)
     sine = np.sin(2 * np.pi * 440 * t)
 
-    centroid_per_sec, chroma_per_sec = compute_stft_features(sine, sr)
+    centroid_per_sec, chroma_per_sec, _bass_chroma_per_sec = compute_stft_features(sine, sr)
 
     assert len(centroid_per_sec) == duration
     # Spectral centroid of a pure 440 Hz tone should be ~440 Hz
@@ -74,9 +74,34 @@ def test_compute_stft_features_empty() -> None:
     """Empty audio should return empty arrays."""
     sr = 22050
     empty = np.array([], dtype=np.float32)
-    centroid, chroma = compute_stft_features(empty, sr)
+    centroid, chroma, bass_chroma = compute_stft_features(empty, sr)
     assert len(centroid) == 0
     assert chroma.shape[1] == 12
+    assert bass_chroma.shape[1] == 12
+
+
+def test_compute_stft_features_harmonic_isolation() -> None:
+    """HPSS should produce cleaner chroma even with percussive noise."""
+    sr = 22050
+    duration = 5
+    t = np.linspace(0, duration, sr * duration, endpoint=False, dtype=np.float32)
+    sine = np.sin(2 * np.pi * 440 * t)
+    rng = np.random.default_rng(42)
+    clicks = np.zeros_like(sine)
+    for i in range(0, len(clicks), sr // 2):
+        clicks[i : i + 100] = rng.standard_normal(min(100, len(clicks) - i))
+    mixed = (sine + 0.5 * clicks).astype(np.float32)
+
+    _centroid, chroma, _bass_chroma = compute_stft_features(mixed, sr)
+
+    mean_chroma = chroma.mean(axis=0)
+    assert np.argmax(mean_chroma) == 9, (
+        f"Expected A (bin 9) dominant, got bin {np.argmax(mean_chroma)}"
+    )
+    sorted_chroma = np.sort(mean_chroma)[::-1]
+    assert sorted_chroma[0] > sorted_chroma[1] * 1.2, (
+        "A bin should be at least 20% stronger than next bin after HPSS"
+    )
 
 
 def test_detect_key_c_major() -> None:
