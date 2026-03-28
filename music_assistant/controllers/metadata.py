@@ -45,6 +45,7 @@ from music_assistant_models.unique_list import UniqueList
 from music_assistant.constants import (
     CONF_LANGUAGE,
     DB_TABLE_ARTISTS,
+    DB_TABLE_GENRE_MEDIA_ITEM_MAPPING,
     DB_TABLE_PLAYLISTS,
     VARIOUS_ARTISTS_MBID,
     VARIOUS_ARTISTS_NAME,
@@ -765,7 +766,16 @@ class MetaDataController(CoreController):
         # collect metadata + create collage images
         # NOTE: we only do/allow this every REFRESH_INTERVAL
         needs_refresh = (time() - (playlist.metadata.last_refresh or 0)) > REFRESH_INTERVAL
+        self.logger.debug(
+            "DEBUG GENRE: _update_playlist_metadata called for %s, "
+            "force_refresh=%s, needs_refresh=%s, last_refresh=%s",
+            playlist.name,
+            force_refresh,
+            needs_refresh,
+            playlist.metadata.last_refresh,
+        )
         if not (force_refresh or needs_refresh):
+            self.logger.debug("DEBUG GENRE: _update_playlist_metadata skipped - not needed")
             return
         self.logger.debug("Updating metadata for Playlist %s", playlist.name)
         playlist.metadata.genres = set()
@@ -800,9 +810,27 @@ class MetaDataController(CoreController):
                 playlist_genres[genre] += 1
             await asyncio.sleep(0)  # yield to eventloop
 
-        playlist_genres_filtered = {genre for genre, count in playlist_genres.items() if count > 5}
-        playlist_genres_filtered = set(list(playlist_genres_filtered)[:8])
-        playlist.metadata.genres.update(playlist_genres_filtered)
+        # filter genres based on playlist size: keep all for small playlists,
+        # require a minimum occurrence count for larger ones to reduce noise
+        total_genre_occurrences = sum(playlist_genres.values())
+        if total_genre_occurrences <= 20:
+            playlist_genres_filtered = set(playlist_genres.keys())
+        else:
+            min_count = min(5, total_genre_occurrences // 10)
+            playlist_genres_filtered = {
+                genre for genre, count in playlist_genres.items() if count > min_count
+            }
+        top_genres = sorted(playlist_genres_filtered, key=lambda g: playlist_genres[g], reverse=True)
+        playlist.metadata.genres.update(top_genres[:8])
+        self.logger.debug(
+            "DEBUG GENRE: playlist %s - collected %d genre occurrences, "
+            "%d unique genres, %d after filter, final genres: %s",
+            playlist.name,
+            total_genre_occurrences,
+            len(playlist_genres),
+            len(playlist_genres_filtered),
+            playlist.metadata.genres,
+        )
         # create collage images
         cur_images: list[MediaItemImage] = playlist.metadata.images or []
         new_images = []
@@ -832,7 +860,62 @@ class MetaDataController(CoreController):
         # set timestamp, used to determine when this function was last called
         playlist.metadata.last_refresh = int(time())
         # update final item in library database
+        self.logger.debug(
+            "DEBUG GENRE: saving playlist %s with genres=%s, last_refresh=%s",
+            playlist.name,
+            playlist.metadata.genres,
+            playlist.metadata.last_refresh,
+        )
         await self.mass.music.playlists.update_item_in_library(playlist.item_id, playlist)
+
+    async def save_playlist_genres(
+        self, playlist: Playlist, genre_counts: dict[str, int]
+    ) -> None:
+        """Filter and persist playlist genres from pre-computed counts.
+
+        :param playlist: The library playlist to update.
+        :param genre_counts: Mapping of genre name to occurrence count.
+        """
+        # filter genres based on playlist size: keep all for small playlists,
+        # require a minimum occurrence count for larger ones to reduce noise
+        total = sum(genre_counts.values())
+        if total <= 20:
+            filtered = set(genre_counts.keys())
+        else:
+            min_count = min(5, total // 10)
+            filtered = {genre for genre, count in genre_counts.items() if count > min_count}
+        top_genres = sorted(filtered, key=lambda g: genre_counts[g], reverse=True)
+        new_genres = set(top_genres[:8])
+        self.logger.debug(
+            "DEBUG GENRE: save_playlist_genres for %s - %d occurrences, "
+            "%d unique, %d after filter, final: %s",
+            playlist.name,
+            total,
+            len(genre_counts),
+            len(filtered),
+            new_genres,
+        )
+        # update the playlist's genres in the library database
+        cur_item = await self.mass.music.playlists.get_library_item(int(playlist.item_id))
+        cur_item.metadata.genres = new_genres
+        await self.mass.music.playlists.update_item_in_library(
+            cur_item.item_id, cur_item, overwrite=True
+        )
+        # replace genre mappings so the UI reflects the new genres immediately
+        playlist_id = int(playlist.item_id)
+        db = self.mass.music.database
+        await db.execute(
+            f"DELETE FROM {DB_TABLE_GENRE_MEDIA_ITEM_MAPPING} "
+            "WHERE media_id = :media_id AND media_type = :media_type",
+            {"media_id": playlist_id, "media_type": MediaType.PLAYLIST.value},
+        )
+        genre_controller = self.mass.music.genres
+        for genre_name in new_genres:
+            genre_ids = await genre_controller._find_genres_for_alias(genre_name)
+            for genre_id in genre_ids:
+                await genre_controller.add_media_mapping(
+                    genre_id, MediaType.PLAYLIST, playlist_id, alias=genre_name
+                )
 
     async def _update_audiobook_metadata(
         self, audiobook: Audiobook, force_refresh: bool = False
