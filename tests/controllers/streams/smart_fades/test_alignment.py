@@ -4,15 +4,15 @@ import numpy as np
 
 from music_assistant.controllers.streams.smart_fades.alignment import (
     AlignmentResult,
+    _calculate_energy_crossfade_duration,
+    _clamp_duration_by_bpm,
+    _find_fadein_entry,
+    _find_fadeout_start,
+    _find_spectral_fadein_entry,
+    _find_spectral_fadeout_start,
+    _select_crossfade_curve_type,
     _snap_to_phrase_boundary,
-    calculate_energy_crossfade_duration,
-    clamp_duration_by_bpm,
-    find_fadein_entry,
-    find_fadeout_start,
-    find_spectral_fadein_entry,
-    find_spectral_fadeout_start,
     resolve_alignment,
-    select_crossfade_curve_type,
 )
 from music_assistant.models.audio_analysis import AudioAnalysisData
 
@@ -99,7 +99,7 @@ def test_clamp_duration_by_bpm_small_diff() -> None:
     bar_duration = 4 * (60.0 / 120.0)  # 2s per bar at 120 BPM
     max_16_bars = 16 * bar_duration  # 32s
 
-    result = clamp_duration_by_bpm(duration=40.0, bpm=120.0, bpm_diff_percent=3.0)
+    result = _clamp_duration_by_bpm(duration=40.0, bpm=120.0, bpm_diff_percent=3.0)
     assert result == max_16_bars
 
 
@@ -108,13 +108,13 @@ def test_clamp_duration_by_bpm_large_diff() -> None:
     bar_duration = 4 * (60.0 / 120.0)
     max_4_bars = 4 * bar_duration  # 8s
 
-    result = clamp_duration_by_bpm(duration=40.0, bpm=120.0, bpm_diff_percent=15.0)
+    result = _clamp_duration_by_bpm(duration=40.0, bpm=120.0, bpm_diff_percent=15.0)
     assert result == max_4_bars
 
 
 def test_clamp_duration_within_limit() -> None:
     """Duration already within limit should not be changed."""
-    result = clamp_duration_by_bpm(duration=10.0, bpm=120.0, bpm_diff_percent=3.0)
+    result = _clamp_duration_by_bpm(duration=10.0, bpm=120.0, bpm_diff_percent=3.0)
     assert result == 10.0
 
 
@@ -155,7 +155,7 @@ def test_find_fadeout_start_clear_decline() -> None:
     # Downbeats every 2s (120 BPM, 4/4)
     downbeats = np.arange(0, 45, 2.0)
 
-    result = find_fadeout_start(energy, downbeats, bpm=120.0)
+    result = _find_fadeout_start(energy, downbeats, bpm=120.0)
 
     # Knee is around sec 22-24. With 4 bars (8s at 120 BPM) early offset,
     # the fade start should be around sec 14-18.
@@ -168,7 +168,7 @@ def test_find_fadeout_start_flat_energy() -> None:
     energy = np.ones(45, dtype=np.float32) * 0.8
     downbeats = np.arange(0, 45, 2.0)
 
-    result = find_fadeout_start(energy, downbeats)
+    result = _find_fadeout_start(energy, downbeats)
 
     # No clear decline — should return None (fallback to current behavior)
     assert result is None
@@ -183,7 +183,7 @@ def test_find_fadein_entry_clear_build() -> None:
     energy[25:] = 0.9
     downbeats = np.arange(0, 45, 2.0)
 
-    result = find_fadein_entry(energy, downbeats)
+    result = _find_fadein_entry(energy, downbeats)
 
     # Should enter in the quiet section well before the build (~sec 0-10)
     assert result is not None
@@ -195,7 +195,7 @@ def test_find_fadein_entry_already_loud() -> None:
     energy = np.ones(45, dtype=np.float32) * 0.9
     downbeats = np.arange(0, 45, 2.0)
 
-    result = find_fadein_entry(energy, downbeats)
+    result = _find_fadein_entry(energy, downbeats)
 
     assert result is None
 
@@ -207,7 +207,7 @@ def test_calculate_energy_crossfade_duration() -> None:
     # Song B rising from 0.1 to 0.9
     energy_in = np.linspace(0.1, 0.9, 30).astype(np.float32)
 
-    duration = calculate_energy_crossfade_duration(
+    duration = _calculate_energy_crossfade_duration(
         energy_out=energy_out,
         fadeout_start=0,
         energy_in=energy_in,
@@ -229,7 +229,7 @@ def test_select_crossfade_curve_type_similar() -> None:
     out = np.linspace(0.8, 0.2, 10, dtype=np.float32)
     inc = np.linspace(0.2, 0.8, 10, dtype=np.float32)
 
-    curve = select_crossfade_curve_type(out, inc)
+    curve = _select_crossfade_curve_type(out, inc)
 
     assert curve == "qsin"
 
@@ -239,7 +239,7 @@ def test_select_crossfade_curve_type_divergent() -> None:
     out = np.linspace(0.8, 0.2, 10, dtype=np.float32)
     inc = np.ones(10, dtype=np.float32) * 0.5
 
-    curve = select_crossfade_curve_type(out, inc)
+    curve = _select_crossfade_curve_type(out, inc)
 
     assert curve == "tri"
 
@@ -256,7 +256,7 @@ def test_find_spectral_fadeout_start_declining() -> None:
     spectral[20:] = np.linspace(3000.0, 500.0, 25).astype(np.float32)
     downbeats = np.arange(0, 45, 2.0)
 
-    result = find_spectral_fadeout_start(spectral, downbeats, bpm=120.0)
+    result = _find_spectral_fadeout_start(spectral, downbeats, bpm=120.0)
 
     assert result is not None
     assert 8 <= result <= 22, f"Expected fade start around 8-22s, got {result}"
@@ -267,7 +267,7 @@ def test_find_spectral_fadeout_start_flat() -> None:
     spectral = np.ones(45, dtype=np.float32) * 2000.0
     downbeats = np.arange(0, 45, 2.0)
 
-    result = find_spectral_fadeout_start(spectral, downbeats)
+    result = _find_spectral_fadeout_start(spectral, downbeats)
 
     assert result is None
 
@@ -278,7 +278,7 @@ def test_find_spectral_fadeout_start_near_silence() -> None:
     spectral += np.random.default_rng(42).uniform(-0.3, 0.3, 45).astype(np.float32)
     downbeats = np.arange(0, 45, 2.0)
 
-    result = find_spectral_fadeout_start(spectral, downbeats)
+    result = _find_spectral_fadeout_start(spectral, downbeats)
 
     assert result is None
 
@@ -292,7 +292,7 @@ def test_find_spectral_fadeout_start_noisy_with_trend() -> None:
     spectral = base + noise
     downbeats = np.arange(0, 45, 2.0)
 
-    result = find_spectral_fadeout_start(spectral, downbeats, bpm=120.0)
+    result = _find_spectral_fadeout_start(spectral, downbeats, bpm=120.0)
 
     assert result is not None
     assert 8 <= result <= 24, f"Expected fade start around 8-24s, got {result}"
@@ -311,7 +311,7 @@ def test_find_spectral_fadein_entry_rising() -> None:
     spectral[25:] = 3000.0
     downbeats = np.arange(0, 45, 2.0)
 
-    result = find_spectral_fadein_entry(spectral, downbeats)
+    result = _find_spectral_fadein_entry(spectral, downbeats)
 
     assert result is not None
     assert 0 <= result <= 12, f"Expected entry around 0-12s, got {result}"
@@ -322,7 +322,7 @@ def test_find_spectral_fadein_entry_flat() -> None:
     spectral = np.ones(45, dtype=np.float32) * 2000.0
     downbeats = np.arange(0, 45, 2.0)
 
-    result = find_spectral_fadein_entry(spectral, downbeats)
+    result = _find_spectral_fadein_entry(spectral, downbeats)
 
     assert result is None
 
@@ -332,7 +332,7 @@ def test_find_spectral_fadein_entry_already_bright() -> None:
     spectral = np.ones(45, dtype=np.float32) * 3000.0
     downbeats = np.arange(0, 45, 2.0)
 
-    result = find_spectral_fadein_entry(spectral, downbeats)
+    result = _find_spectral_fadein_entry(spectral, downbeats)
 
     assert result is None
 
