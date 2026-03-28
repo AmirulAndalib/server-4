@@ -151,3 +151,26 @@ def test_detect_key_filters_intro_outro() -> None:
 
     assert key["root"] == "C"
     assert key["mode"] == "major"
+
+
+def test_detect_key_bass_tonic_disambiguation() -> None:
+    """Bass chroma should disambiguate tonic from dominant.
+
+    Full-range chroma is ambiguous between F major and C major.
+    Bass chroma clearly shows F as the bass note (tonic).
+    """
+    chroma = np.zeros((20, 12), dtype=np.float32)
+    # F major triad with C nearly as strong as F (tonic-dominant ambiguity)
+    chroma[:, 5] = 0.9  # F
+    chroma[:, 9] = 0.7  # A
+    chroma[:, 0] = 0.85  # C — almost as strong as F
+
+    # Bass chroma: F dominates the bass register
+    bass_chroma = np.zeros((20, 12), dtype=np.float32)
+    bass_chroma[:, 5] = 1.0  # F strong in bass
+    bass_chroma[:, 0] = 0.2  # C weak in bass
+
+    key = detect_key(chroma, duration=20.0, bass_chroma_per_second=bass_chroma)
+
+    assert key["root"] == "F", f"Expected F major, got {key['root']} {key['mode']}"
+    assert key["mode"] == "major"

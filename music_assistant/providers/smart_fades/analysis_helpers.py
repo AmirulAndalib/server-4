@@ -157,10 +157,11 @@ _KEY_PROFILE_MINOR = np.array(
 _NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"]
 
 
-def detect_key(
+def detect_key(  # noqa: PLR0915
     chroma_per_second: npt.NDArray[np.float32],
     duration: float,  # noqa: ARG001
     energy_per_second: npt.NDArray[np.float32] | None = None,
+    bass_chroma_per_second: npt.NDArray[np.float32] | None = None,
 ) -> MusicalKeyResult:
     """Detect musical key using Sha'ath profiles with Pearson correlation.
 
@@ -168,10 +169,13 @@ def detect_key(
     intro/outro skew from ambient pads or sparse instrumentation.
     When energy_per_second is provided, weights chroma by RMS energy so
     loud sections (choruses, drops) contribute more than quiet breakdowns.
+    When bass_chroma_per_second is provided, blends bass-register chroma
+    into the main chroma to help disambiguate tonic from dominant.
 
     :param chroma_per_second: Array of shape (T_seconds, 12) with chroma energy per second.
     :param duration: Total track duration in seconds.
     :param energy_per_second: Optional RMS energy per second for energy-weighted aggregation.
+    :param bass_chroma_per_second: Optional bass-register chroma for tonic disambiguation.
     :return: Dict with keys 'root', 'mode', 'confidence' (MusicalKey-compatible).
     """
     if len(chroma_per_second) == 0:
@@ -180,9 +184,13 @@ def detect_key(
     if len(chroma_per_second) > 20:
         trimmed = chroma_per_second[10:-10]
         trimmed_energy = energy_per_second[10:-10] if energy_per_second is not None else None
+        trimmed_bass = (
+            bass_chroma_per_second[10:-10] if bass_chroma_per_second is not None else None
+        )
     else:
         trimmed = chroma_per_second
         trimmed_energy = energy_per_second
+        trimmed_bass = bass_chroma_per_second
 
     # Energy-weighted chroma aggregation: loud sections contribute more
     if trimmed_energy is not None and len(trimmed_energy) == len(trimmed):
@@ -192,6 +200,15 @@ def detect_key(
         mean_chroma = mean_chroma / weight_sum if weight_sum > 0 else trimmed.mean(axis=0)
     else:
         mean_chroma = trimmed.mean(axis=0)
+
+    # Blend bass-register chroma to help disambiguate tonic from dominant.
+    # The tonic almost always dominates the bass, while the dominant does not.
+    if trimmed_bass is not None and len(trimmed_bass) == len(trimmed):
+        mean_bass = trimmed_bass.mean(axis=0)
+        bass_norm = mean_bass.sum()
+        if bass_norm > 1e-10:
+            mean_bass = mean_bass / bass_norm
+            mean_chroma = 0.8 * mean_chroma + 0.2 * mean_bass
 
     if mean_chroma.sum() < 1e-10:
         return {"root": "C", "mode": "major", "confidence": 0.0}
