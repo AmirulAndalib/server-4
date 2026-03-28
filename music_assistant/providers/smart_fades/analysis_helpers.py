@@ -30,7 +30,7 @@ def compute_rms_per_second(
         return np.array([], dtype=np.float32)
     trimmed = pcm[: n_full_seconds * sr]
     frames = trimmed.reshape(n_full_seconds, sr)
-    return np.sqrt(np.mean(frames**2, axis=1)).astype(np.float32)
+    return np.sqrt(np.mean(frames**2, axis=1))
 
 
 def compute_stft_features(
@@ -63,9 +63,16 @@ def compute_stft_features(
     # Compute STFT once — all features derived from this
     stft_matrix = np.abs(librosa.stft(y=pcm, n_fft=n_fft, hop_length=hop_length, center=True))
 
-    # Spectral centroid per frame
+    # Zero out sub-bass bins (<50Hz) before computing centroid.
+    # Sub-bass rumble and DC offset bias the centroid downward without
+    # contributing to perceived brightness used for crossfade alignment.
+    freqs = librosa.fft_frequencies(sr=sr, n_fft=n_fft)
+    centroid_stft = stft_matrix.copy()
+    centroid_stft[freqs < 50] = 0
+
+    # Spectral centroid per frame (using sub-bass filtered STFT)
     centroid_per_frame = librosa.feature.spectral_centroid(
-        S=stft_matrix,
+        S=centroid_stft,
         sr=sr,
         n_fft=n_fft,
         hop_length=hop_length,
@@ -91,7 +98,10 @@ def compute_stft_features(
         return empty_centroid, empty_chroma
 
     trimmed_centroid = centroid_per_frame[: n_full_seconds * frames_per_sec]
-    centroid_per_sec = trimmed_centroid.reshape(n_full_seconds, frames_per_sec).mean(axis=1)
+    # Use nanmean to handle silent frames where librosa returns NaN (0/0 in weighted mean)
+    centroid_per_sec = np.nanmean(trimmed_centroid.reshape(n_full_seconds, frames_per_sec), axis=1)
+    # Replace any remaining NaN (fully silent seconds) with 0.0
+    np.nan_to_num(centroid_per_sec, copy=False, nan=0.0)
 
     trimmed_chroma = chroma_per_frame[:, : n_full_seconds * frames_per_sec]
     chroma_per_sec = trimmed_chroma.reshape(12, n_full_seconds, frames_per_sec).mean(axis=2).T
