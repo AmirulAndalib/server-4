@@ -12,7 +12,7 @@ from music_assistant.models.audio_analysis import AudioAnalysisData
 
 
 def _make_analysis(bpm: float = 120.0, duration: float = 180.0) -> AudioAnalysisData:
-    """Helper to create AudioAnalysisData with sensible defaults."""
+    """Create AudioAnalysisData with sensible defaults."""
     beats = np.arange(0, duration, 60.0 / bpm)
     downbeats = beats[::4]
     return AudioAnalysisData(
@@ -28,7 +28,7 @@ def _make_alignment(
     fadein_start_pos: float | None = 5.0,
     crossfade_duration: float = 16.0,
 ) -> AlignmentResult:
-    """Helper to create AlignmentResult with sensible defaults."""
+    """Create AlignmentResult with sensible defaults."""
     return AlignmentResult(
         strategy="energy",
         fadeout_start_pos=fadeout_start_pos,

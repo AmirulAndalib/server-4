@@ -57,6 +57,17 @@ def resolve_time_stretch(
     bpm_ratio = fade_in_bpm / fade_out_bpm
     bpm_diff_percent = get_bpm_diff_percentage(fade_out_bpm, fade_in_bpm)
 
+    if logger:
+        logger.debug(
+            "Time stretch decision: out_bpm=%.1f, in_bpm=%.1f, "
+            "ratio=%.4f, diff=%.1f%%, threshold=%.1f%%",
+            fade_out_bpm,
+            fade_in_bpm,
+            bpm_ratio,
+            bpm_diff_percent,
+            threshold_percent,
+        )
+
     no_stretch = TimeStretchDecision(
         apply=False,
         bpm_ratio=bpm_ratio,
