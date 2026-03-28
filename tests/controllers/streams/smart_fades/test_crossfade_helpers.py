@@ -1,40 +1,11 @@
-"""Tests for shared crossfade helpers (BPM diff, downbeat extrapolation, tempo steps)."""
+"""Tests for shared crossfade helpers (BPM diff, downbeat extrapolation)."""
 
 import numpy as np
 
 from music_assistant.controllers.streams.smart_fades.crossfade_helpers import (
-    compute_gradual_tempo_steps,
     extrapolate_downbeats,
     get_bpm_diff_percentage,
 )
-
-
-def test_compute_gradual_tempo_steps_5_percent() -> None:
-    """5% tempo change should produce S-curve steps with max 0.5% per step."""
-    downbeats = np.arange(0, 20, 2.0)
-
-    steps = compute_gradual_tempo_steps(
-        start_ratio=1.0,
-        end_ratio=1.05,
-        downbeats=downbeats,
-    )
-
-    assert len(steps) > 0
-    ratios = [s[1] for s in steps]
-    assert abs(ratios[0] - 1.0) < 0.01
-    assert abs(ratios[-1] - 1.05) < 0.001
-
-    # S-curve: middle steps change faster than edges
-    if len(ratios) > 4:
-        early_delta = abs(ratios[1] - ratios[0])
-        mid_idx = len(ratios) // 2
-        mid_delta = abs(ratios[mid_idx] - ratios[mid_idx - 1])
-        assert mid_delta > early_delta
-
-    # Max step <= 0.5%
-    for i in range(1, len(ratios)):
-        assert abs(ratios[i] - ratios[i - 1]) <= 0.006
-
 
 # ---------------------------------------------------------------------------
 # get_bpm_diff_percentage tests
