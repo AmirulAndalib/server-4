@@ -167,8 +167,9 @@ class SmartCrossFade(SmartFade):
     """Smart fades class that implements a Smart Fade mode."""
 
     # Only apply time stretching if BPM difference is < this %
-    # Gradual S-curve stretch is imperceptible up to 8% with beat-level stepping
-    time_stretch_bpm_percentage_threshold: float = 8.0
+    # Gradual S-curve stretch is imperceptible up to 6% with beat-level stepping
+    time_stretch_bpm_percentage_threshold: float = 6.0
+    time_stretch_duration: float = 5.0
 
     def __init__(
         self,
@@ -206,6 +207,7 @@ class SmartCrossFade(SmartFade):
             fade_in_analysis=self.fade_in_analysis,
             alignment=alignment,
             threshold_percent=self.time_stretch_bpm_percentage_threshold,
+            stretch_duration=self.time_stretch_duration,
             logger=self.logger,
         )
 
