@@ -39,28 +39,20 @@ All positions are in **source-audio time** (unstretched). Compensation for time-
 
 #### `resolve_alignment()` function
 
-Top-level function that runs the full alignment cascade. Takes explicit parameters instead of reaching into `self`:
+Top-level function that runs the full alignment cascade. Takes the two `AudioAnalysisData` objects directly instead of unpacking every field:
 
 ```python
 def resolve_alignment(
     *,
-    fade_out_energy: npt.NDArray[np.float32] | None,
-    fade_in_energy: npt.NDArray[np.float32] | None,
-    fade_out_spectral: npt.NDArray[np.float32] | None,
-    fade_in_spectral: npt.NDArray[np.float32] | None,
-    fade_out_downbeats: npt.NDArray[np.float64],
-    fade_in_downbeats: npt.NDArray[np.float64],
-    fade_out_beats: npt.NDArray[np.float64],
-    fade_in_beats: npt.NDArray[np.float64],
-    fade_out_bpm: float,
-    fade_in_bpm: float,
-    fade_out_duration: float,
-    fade_in_duration: float,
+    fade_out_analysis: AudioAnalysisData,
+    fade_in_analysis: AudioAnalysisData,
     extrapolated_fadeout_downbeats: npt.NDArray[np.float64],
     buffer_duration: float = SMART_CROSSFADE_DURATION,
     logger: logging.Logger | None = None,
 ) -> AlignmentResult:
 ```
+
+Any derived values (buffer-relative downbeats, energy slices, etc.) are computed internally or via helper functions in `crossfade_helpers.py`.
 
 Internally calls three private functions in order:
 1. `_try_energy_alignment(...)` -> `AlignmentResult | None`
@@ -103,22 +95,21 @@ class TimeStretchDecision:
 
 #### `resolve_time_stretch()` function
 
-Extracts the time-stretch decision logic from `_build()`:
+Extracts the time-stretch decision logic from `_build()`. Takes the analysis data objects directly:
 
 ```python
 def resolve_time_stretch(
     *,
-    fade_out_bpm: float,
-    fade_in_bpm: float,
-    fade_out_beats: npt.NDArray[np.float64],
-    fade_out_downbeats_rel: npt.NDArray[np.float64],
-    fade_out_duration: float,
+    fade_out_analysis: AudioAnalysisData,
+    fade_in_analysis: AudioAnalysisData,
     alignment: AlignmentResult,
     threshold_percent: float = 8.0,
     buffer_duration: float = SMART_CROSSFADE_DURATION,
     logger: logging.Logger | None = None,
 ) -> TimeStretchDecision:
 ```
+
+BPM ratio, diff percentage, beat/downbeat timestamp selection, and duration are all derived internally from the analysis data.
 
 Handles:
 - BPM ratio and diff calculation
@@ -149,16 +140,15 @@ def _build(self) -> None:
     self.extrapolated_fadeout_downbeats = extrapolate_downbeats(...)
 
     alignment = resolve_alignment(
-        fade_out_energy=self.fade_out_energy,
-        fade_in_energy=self.fade_in_energy,
-        # ... all explicit parameters ...
+        fade_out_analysis=self.fade_out_analysis,
+        fade_in_analysis=self.fade_in_analysis,
+        extrapolated_fadeout_downbeats=self.extrapolated_fadeout_downbeats,
     )
 
     stretch = resolve_time_stretch(
-        fade_out_bpm=self.fade_out_bpm,
-        fade_in_bpm=self.fade_in_bpm,
+        fade_out_analysis=self.fade_out_analysis,
+        fade_in_analysis=self.fade_in_analysis,
         alignment=alignment,
-        # ... explicit parameters ...
     )
 
     alignment = compensate_for_stretch(alignment, stretch)
@@ -193,12 +183,14 @@ This method is ~100 lines (the current filter chain section of `_build()`), whic
 - Remove `_try_energy_alignment()`, `_try_spectral_alignment()` (moved to `alignment.py`)
 - Remove `_clamp_duration_by_bpm()` (moved to `alignment.py`)
 - Remove `_calculate_optimal_crossfade_bars()`, `_calculate_optimal_fade_timing()`, `_calculate_crossfade_duration()`, `_adjust_crossfade_to_downbeats()` (absorbed into bar-count alignment in `alignment.py`)
-- Keep `SmartFade` base class, `StandardCrossFade`, `extrapolate_downbeats()`, `get_bpm_diff_percentage()`
+- Move `extrapolate_downbeats()` and `get_bpm_diff_percentage()` to `crossfade_helpers.py` (generic helpers, not fade-class-specific)
+- `SmartCrossFade` constructor stores `self.fade_out_analysis` and `self.fade_in_analysis` as `AudioAnalysisData` objects directly, instead of unpacking every field into separate attributes
+- Keep `SmartFade` base class, `StandardCrossFade`
 
 ### No changes to these files
 
 - **`filters.py`** -- already clean, no changes needed
-- **`crossfade_helpers.py`** -- functions stay where they are; `alignment.py` calls into them
+- **`crossfade_helpers.py`** -- existing functions stay; gains `extrapolate_downbeats()` and `get_bpm_diff_percentage()` from `fades.py`; `alignment.py` calls into it
 - **`mixer.py`** -- public API unchanged; still instantiates `SmartCrossFade(logger, analysis_out, analysis_in)`
 - **`__init__.py`** -- only exports `SmartFadesMixer`, unchanged
 - **`models/audio_analysis.py`** -- data model unchanged
@@ -209,9 +201,9 @@ This method is ~100 lines (the current filter chain section of `_build()`), whic
 music_assistant/controllers/streams/smart_fades/
     __init__.py            (unchanged)
     mixer.py               (unchanged)
-    fades.py               (~350 lines, down from ~990)
+    fades.py               (~250 lines, down from ~990)
     filters.py             (unchanged, ~307 lines)
-    crossfade_helpers.py   (unchanged, ~619 lines)
+    crossfade_helpers.py   (~720 lines, gains extrapolate_downbeats + get_bpm_diff_percentage)
     alignment.py           (NEW, ~400 lines)
     time_stretch.py        (NEW, ~120 lines)
 ```
@@ -251,6 +243,8 @@ DJMixFade gets alignment and stretching for free. Only the filter chain differs.
 | `fades.py` `_clamp_duration_by_bpm()` | Duration clamping | `alignment.py` `clamp_duration_by_bpm()` |
 | `fades.py` `_build()` lines 476-532 | Time-stretch decision + compensation | `time_stretch.py` `resolve_time_stretch()` + `compensate_for_stretch()` |
 | `fades.py` `_build()` lines 534-633 | Filter chain construction | `fades.py` `_build_filters()` (new method) |
+| `fades.py` `extrapolate_downbeats()` | Downbeat extrapolation helper | `crossfade_helpers.py` |
+| `fades.py` `get_bpm_diff_percentage()` | BPM diff utility | `crossfade_helpers.py` |
 
 ## Backward compatibility
 
