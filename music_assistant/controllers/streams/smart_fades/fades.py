@@ -231,9 +231,7 @@ class SmartCrossFade(SmartFade):
             alignment.curve_type or "default",
         )
 
-    def _build_filters(
-        self, alignment: AlignmentResult, stretch: TimeStretchDecision
-    ) -> None:
+    def _build_filters(self, alignment: AlignmentResult, stretch: TimeStretchDecision) -> None:
         """Construct the filter chain from alignment and stretch decisions.
 
         :param alignment: Resolved and compensated alignment result.
@@ -295,9 +293,7 @@ class SmartCrossFade(SmartFade):
 
         # Lowpass on outgoing track
         if fadeout_end_pos is not None:
-            fadeout_eq_duration = min(
-                max(alignment.crossfade_duration * 2.5, 8.0), fadeout_end_pos
-            )
+            fadeout_eq_duration = min(max(alignment.crossfade_duration * 2.5, 8.0), fadeout_end_pos)
             fadeout_eq_start = max(0, fadeout_end_pos - fadeout_eq_duration)
         else:
             fadeout_eq_duration = min(
