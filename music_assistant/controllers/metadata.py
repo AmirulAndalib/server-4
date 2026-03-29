@@ -297,31 +297,34 @@ class MetaDataController(CoreController):
                 # this shouldn't happen but just in case.
                 raise RuntimeError("Metadata can only be updated for library items")
 
-            async with self._throttler:
-                if item.media_type == MediaType.ARTIST:
-                    await self._update_artist_metadata(
-                        cast("Artist", item), force_refresh=force_refresh
-                    )
-                if item.media_type == MediaType.ALBUM:
-                    await self._update_album_metadata(
-                        cast("Album", item), force_refresh=force_refresh
-                    )
-                if item.media_type == MediaType.TRACK:
-                    await self._update_track_metadata(
-                        cast("Track", item), force_refresh=force_refresh
-                    )
-                if item.media_type == MediaType.PLAYLIST:
-                    await self._update_playlist_metadata(
-                        cast("Playlist", item), force_refresh=force_refresh
-                    )
-                if item.media_type == MediaType.AUDIOBOOK:
-                    await self._update_audiobook_metadata(
-                        cast("Audiobook", item), force_refresh=force_refresh
-                    )
-                if item.media_type == MediaType.PODCAST:
-                    await self._update_podcast_metadata(
-                        cast("Podcast", item), force_refresh=force_refresh
-                    )
+            # playlist metadata updates only iterate local tracks and build
+            # collage images — no external API calls, so no need to throttle
+            if item.media_type == MediaType.PLAYLIST:
+                await self._update_playlist_metadata(
+                    cast("Playlist", item), force_refresh=force_refresh
+                )
+            else:
+                async with self._throttler:
+                    if item.media_type == MediaType.ARTIST:
+                        await self._update_artist_metadata(
+                            cast("Artist", item), force_refresh=force_refresh
+                        )
+                    if item.media_type == MediaType.ALBUM:
+                        await self._update_album_metadata(
+                            cast("Album", item), force_refresh=force_refresh
+                        )
+                    if item.media_type == MediaType.TRACK:
+                        await self._update_track_metadata(
+                            cast("Track", item), force_refresh=force_refresh
+                        )
+                    if item.media_type == MediaType.AUDIOBOOK:
+                        await self._update_audiobook_metadata(
+                            cast("Audiobook", item), force_refresh=force_refresh
+                        )
+                    if item.media_type == MediaType.PODCAST:
+                        await self._update_podcast_metadata(
+                            cast("Podcast", item), force_refresh=force_refresh
+                        )
             return item
 
     def schedule_update_metadata(self, item: MediaItemType) -> None:
@@ -457,7 +460,7 @@ class MetaDataController(CoreController):
             image_format = _detect_image_format(path)
         if provider == "builtin" and path.startswith("/collage/"):
             # special case for collage images
-            collage_rel = path.split("/collage/")[-1]
+            collage_rel = path.rsplit("/collage/", maxsplit=1)[-1]
             if not is_safe_path(collage_rel):
                 raise FileNotFoundError("Invalid collage path")
             path = os.path.join(self._collage_images_dir, collage_rel)
@@ -843,32 +846,18 @@ class MetaDataController(CoreController):
         playlist.metadata.images = UniqueList(new_images) if new_images else None
         # set timestamp, used to determine when this function was last called
         playlist.metadata.last_refresh = int(time())
+        # update genre mappings before the library item update, because
+        # update_item_in_library fires MEDIA_ITEM_UPDATED which the UI uses
+        # to re-fetch genres via get_genres_for_media_item
+        await self._update_playlist_genre_mappings(playlist)
         # update final item in library database
         await self.mass.music.playlists.update_item_in_library(playlist.item_id, playlist)
 
-    async def save_playlist_genres(self, playlist: Playlist, genre_counts: dict[str, int]) -> None:
-        """Filter and persist playlist genres from pre-computed counts.
+    async def _update_playlist_genre_mappings(self, playlist: Playlist) -> None:
+        """Replace genre mappings in the DB for a playlist.
 
-        Called from playlists.tracks() during force_refresh. Genres are collected
-        inline during track iteration to avoid a redundant second pass through
-        _update_playlist_metadata, which is throttled and subject to
-        REFRESH_INTERVAL, making it unsuitable for on-demand genre updates.
-
-        :param playlist: The library playlist to update.
-        :param genre_counts: Mapping of genre name to occurrence count.
+        :param playlist: The playlist whose metadata.genres to persist.
         """
-        # filter genres based on playlist size: keep all for small playlists,
-        # require a minimum occurrence count for larger ones to reduce noise
-        total = sum(genre_counts.values())
-        if total <= 20:
-            filtered = set(genre_counts.keys())
-        else:
-            min_count = min(5, total // 10)
-            filtered = {genre for genre, count in genre_counts.items() if count > min_count}
-        top_genres = sorted(filtered, key=lambda g: genre_counts[g], reverse=True)
-        new_genres = set(top_genres[:8])
-        # replace genre mappings before updating the library item, because the
-        # library update fires MEDIA_ITEM_UPDATED which the UI uses to re-fetch genres
         playlist_id = int(playlist.item_id)
         db = self.mass.music.database
         await db.execute(
@@ -877,19 +866,12 @@ class MetaDataController(CoreController):
             {"media_id": playlist_id, "media_type": MediaType.PLAYLIST.value},
         )
         genre_controller = self.mass.music.genres
-        for genre_name in new_genres:
+        for genre_name in playlist.metadata.genres:
             genre_ids = await genre_controller._find_genres_for_alias(genre_name)
             for genre_id in genre_ids:
                 await genre_controller.add_media_mapping(
                     genre_id, MediaType.PLAYLIST, playlist_id, alias=genre_name
                 )
-        # update the playlist's genres in the library database
-        # this fires MEDIA_ITEM_UPDATED so the UI refreshes with the new mappings
-        cur_item = await self.mass.music.playlists.get_library_item(playlist_id)
-        cur_item.metadata.genres = new_genres
-        await self.mass.music.playlists.update_item_in_library(
-            cur_item.item_id, cur_item, overwrite=True
-        )
 
     async def _update_audiobook_metadata(
         self, audiobook: Audiobook, force_refresh: bool = False

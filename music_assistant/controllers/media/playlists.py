@@ -13,7 +13,7 @@ from music_assistant_models.errors import (
     MediaNotFoundError,
     ProviderUnavailableError,
 )
-from music_assistant_models.media_items import Album, Playlist, Track
+from music_assistant_models.media_items import Playlist, Track
 
 from music_assistant.constants import DB_TABLE_PLAYLISTS, PLAYLIST_MEDIA_TYPES, PlaylistPlayableItem
 from music_assistant.controllers.media.audiobooks import AudiobooksController
@@ -110,16 +110,11 @@ class PlaylistController(MediaControllerBase[Playlist]):
         force_refresh: bool = False,
     ) -> AsyncGenerator[PlaylistPlayableItem, None]:
         """Return playlist tracks for the given provider playlist id."""
-        library_item: Playlist | None = None
         if provider_instance_id_or_domain == "library":
             library_item = await self.get_library_item(item_id)
             provider_instance_id_or_domain, item_id = self._select_provider_id(library_item)
         # playlist tracks are not stored in the db,
-        # we always fetched them (cached) from the provider.
-        # Collect genres inline on force_refresh to avoid a redundant second
-        # iteration in _update_playlist_metadata (which is throttled and
-        # subject to REFRESH_INTERVAL, making it unsuitable for on-demand updates).
-        genre_counts: dict[str, int] | None = {} if force_refresh else None
+        # we always fetched them (cached) from the provider
         page = 0
         while True:
             tracks = await self._get_provider_playlist_tracks(
@@ -131,26 +126,8 @@ class PlaylistController(MediaControllerBase[Playlist]):
             if not tracks:
                 break
             for track in tracks:
-                if genre_counts is not None:
-                    # extract genres from track, falling back to album genres
-                    if track.metadata.genres:
-                        genres = track.metadata.genres
-                    elif (
-                        isinstance(track, Track)
-                        and track.album
-                        and isinstance(track.album, Album)
-                        and track.album.metadata.genres
-                    ):
-                        genres = track.album.metadata.genres
-                    else:
-                        genres = set()
-                    for genre in genres:
-                        genre_counts[genre] = genre_counts.get(genre, 0) + 1
                 yield track
             page += 1
-        # save collected genres to the playlist
-        if genre_counts is not None and library_item:
-            await self.mass.metadata.save_playlist_genres(library_item, genre_counts)
 
     async def create_playlist(
         self,
