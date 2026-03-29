@@ -80,18 +80,25 @@ Step 4: Alignment determines actual_duration based on energy context:
 
 Step 5: final_duration = min(actual_duration, max_fade_seconds)
 
-Step 6: Incoming track enters at first downbeat (always).
+Step 6: Characterize incoming track's opening:
+        - Has quiet intro? → enter at quiet region start, allow long blend
+        - Starts loud? → enter at first downbeat, shorten duration, raise crossover
 ```
 
-### Incoming Track: Always First Downbeat
+### Incoming Track: Characterize, Don't Gate
 
-The incoming track always enters at its first downbeat. No fadein entry detection. The rationale:
+The incoming track's opening character (quiet intro vs loud start) modulates the crossfade aggressiveness but does NOT block alignment. This replaces the current all-or-nothing `_find_fadein_entry` gate.
 
-- **Quiet intro:** The long max_fade_seconds from key compat gives room for the intro to build under the outgoing track. The natural overlap is long and smooth.
-- **Loud start:** The energy knee or energy ratio shortens the actual_duration. The overlap is brief and clean. The EQ crossover (from key+spectral) manages the spectral collision.
-- **No analysis data:** Bar-count fallback enters at first downbeat anyway.
+**Quiet intro found:** Enter at the start of the quiet region. The long max_fade_seconds from key compat gives room for the intro to build under the outgoing track. Smooth, invisible transition.
 
-`_find_fadein_entry` and `_find_quiet_region_entry` are removed entirely.
+**Loud start (no quiet region):** Enter at first downbeat. Compensate:
+- Shorten duration (incoming doesn't need build time)
+- Raise crossover frequency (more spectral separation to manage energy collision)
+- Use more aggressive EQ sweep curve
+
+The characterization is lightweight — check if the first N seconds of the incoming track's energy stay below a threshold. Not the 140-line quiet-region detection with rise verification and drop rejection. A simple `has_quiet_intro` boolean derived from `mean(energy_head[:10]) < 0.15`.
+
+`_find_quiet_region_entry` is removed. `_find_fadein_entry` is replaced by a simple characterization function (~15 lines).
 
 ---
 
@@ -120,9 +127,9 @@ Also rename `fade_bars` / `fade_seconds` on `CrossfadeParams` to `max_fade_bars`
 
 ### `alignment.py` — major simplification
 
-**Remove (~510 lines):**
-- `_find_fadein_entry` — replaced by "enter at first downbeat"
-- `_find_quiet_region_entry` — helper for removed function
+**Remove (~480 lines):**
+- `_find_quiet_region_entry` — replaced by simple characterization
+- `_find_fadein_entry` — replaced by `_characterize_incoming` (~15 lines)
 - `_calculate_energy_crossfade_duration` — duration from knee position instead
 - `_try_spectral_alignment` — fold spectral knee into single strategy
 - `_find_spectral_fadein_entry` — removed with fadein detection
@@ -140,6 +147,7 @@ Also rename `fade_bars` / `fade_seconds` on `CrossfadeParams` to `max_fade_bars`
 
 **New:**
 - `_find_knee(curve, downbeats, bpm, ...)` — unified knee finder that works on both energy and spectral curves. Replaces `_find_fadeout_start` + `_find_spectral_fadeout_start`.
+- `_characterize_incoming(energy_head)` — returns `has_quiet_intro: bool` and `entry_energy: float`. Simple: `mean(energy[:10]) < 0.15`.
 
 **Rewritten `resolve_alignment`:**
 
