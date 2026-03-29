@@ -249,7 +249,7 @@ class SmartCrossFade(SmartFade):
             logger=self.logger,
         )
 
-        energy_aligned = alignment.strategy in ("energy", "spectral")
+        energy_aligned = alignment.strategy in ("energy", "spectral", "energy_partial")
 
         # Cap crossfade duration: resolver limits based on key/spectral,
         # alignment limits based on available audio and energy positioning
