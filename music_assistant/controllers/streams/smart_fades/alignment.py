@@ -87,7 +87,11 @@ def resolve_alignment(
         if spectral_out is not None:
             spectral_buf = spectral_out[-buffer_secs:] if buffer_secs > 0 else spectral_out
             knee = _find_knee(
-                _normalize_spectral(spectral_buf), fadeout_downbeats_rel, bpm=fade_out_bpm
+                _normalize_spectral(spectral_buf),
+                fadeout_downbeats_rel,
+                bpm=fade_out_bpm,
+                smooth_window=_SPECTRAL_SMOOTH_WINDOW,
+                decline_threshold=_SPECTRAL_DECLINE_THRESHOLD,
             )
 
     # Step 2: Characterize incoming track + determine fadein entry
@@ -252,15 +256,20 @@ def _find_knee(
     energy_tail: npt.NDArray[np.float32],
     downbeats: npt.NDArray[np.float64],
     bpm: float = 120.0,
+    smooth_window: int = _SMOOTH_WINDOW,
+    decline_threshold: float = _DECLINE_THRESHOLD,
 ) -> tuple[float, float] | None:
     """Find where the outgoing track should begin fading out.
 
-    Finds the energy knee (where energy drops below 85% of peak), then backs
-    up by a number of bars so the crossfade starts while Song A is still strong.
+    Finds the energy knee (where energy drops below decline_threshold of peak),
+    then backs up by a number of bars so the crossfade starts while Song A is
+    still strong. Works on both energy and normalized spectral curves.
 
-    :param energy_tail: Per-second energy for the last ~45s of the track (buffer-relative).
+    :param energy_tail: Per-second signal for the last ~45s of the track (buffer-relative).
     :param downbeats: Downbeat timestamps in buffer-relative seconds.
     :param bpm: BPM of the outgoing track (used for bar-length calculations).
+    :param smooth_window: Smoothing window in seconds (wider for noisier signals).
+    :param decline_threshold: Fraction of peak below which a knee is detected.
     :return: Tuple of (phrase-snapped start position, raw knee index) in buffer-relative seconds,
         or None if no clear decline.
     """
@@ -268,7 +277,7 @@ def _find_knee(
         logger.debug("fadeout_start: too short (%d values)", len(energy_tail))
         return None
 
-    smoothed = _smooth(energy_tail)
+    smoothed = _smooth(energy_tail, window=smooth_window)
     peak_idx = int(np.argmax(smoothed))
     peak_val = float(smoothed[peak_idx])
 
@@ -284,7 +293,7 @@ def _find_knee(
         logger.debug("fadeout_start: near-silence (peak=%.3f), returning None", peak_val)
         return None
 
-    threshold = peak_val * _DECLINE_THRESHOLD
+    threshold = peak_val * decline_threshold
 
     # Walk forward from peak to find energy knee
     knee_idx = None
@@ -301,7 +310,7 @@ def _find_knee(
         return None
 
     # Ignore edge effects from smoothing (knee in last few samples of a flat signal)
-    if knee_idx >= len(smoothed) - _SMOOTH_WINDOW:
+    if knee_idx >= len(smoothed) - smooth_window:
         logger.debug(
             "fadeout_start: knee at sec %d is in smoothing edge zone, returning None", knee_idx
         )

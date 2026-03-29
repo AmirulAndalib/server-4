@@ -309,8 +309,8 @@ def test_path_b_incompatible_key_exponential() -> None:
     assert result.curve_type == "exponential"
 
 
-def test_path_b_compatible_key_long_fade_uses_linear() -> None:
-    """Path B: compatible key produces 16-bar max fade, triggering linear curve."""
+def test_path_b_default_curve_is_qsin() -> None:
+    """Path B: default curve is qsin (equal-power)."""
     fade_out = _make_analysis(
         musical_key={"root": "C", "mode": "major", "confidence": 0.9},
     )
@@ -321,7 +321,7 @@ def test_path_b_compatible_key_long_fade_uses_linear() -> None:
     result = resolve_crossfade_params(
         fade_out_analysis=fade_out, fade_in_analysis=fade_in, stretch=stretch
     )
-    assert result.curve_type == "linear"
+    assert result.curve_type == "qsin"
 
 
 # ── Graceful degradation ─────────────────────────────────────────────

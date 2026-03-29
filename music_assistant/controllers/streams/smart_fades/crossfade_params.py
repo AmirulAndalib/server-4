@@ -277,9 +277,7 @@ def _resolve_path_b(
 
     crossover_freq = _resolve_crossover_freq(key_compat, centroid_out, centroid_in, config)
     max_fade_bars = _resolve_fade_bars(key_compat, config)
-    curve_type = _resolve_curve_type(
-        key_compat, spectral_olap, slope_out, slope_in, max_fade_bars, config
-    )
+    curve_type = _resolve_curve_type(key_compat, spectral_olap, slope_out, slope_in, config)
 
     bar_duration = 4.0 * 60.0 / fade_in_bpm
     max_fade_seconds = round(max_fade_bars * bar_duration, 2)
@@ -362,7 +360,6 @@ def _resolve_curve_type(
     spectral_olap: float,
     slope_out: float,
     slope_in: float,
-    fade_bars: int,
     config: CrossfadeConfig,
 ) -> str:
     """Select curve type using priority chain.
@@ -371,7 +368,6 @@ def _resolve_curve_type(
     :param spectral_olap: Spectral overlap 0-1.
     :param slope_out: Outgoing energy slope.
     :param slope_in: Incoming energy slope.
-    :param fade_bars: Resolved fade length in bars.
     :param config: Crossfade configuration.
     """
     if key_compat < config.key_compat_exp_threshold:
@@ -380,8 +376,6 @@ def _resolve_curve_type(
         spectral_olap > config.spectral_overlap_linear_threshold
         and key_compat > config.key_compat_linear_threshold
     ):
-        return "linear"
-    if fade_bars >= config.long_fade_linear_threshold:
         return "linear"
     if slope_out < config.energy_slope_natural_fade:
         return "logarithmic"

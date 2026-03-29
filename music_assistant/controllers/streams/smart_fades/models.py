@@ -189,7 +189,6 @@ class CrossfadeConfig:
     energy_slope_building: float = 0.3
     spectral_overlap_linear_threshold: float = 0.7
     key_compat_linear_threshold: float = 0.5
-    long_fade_linear_threshold: int = 12
 
     # Key detection fallback
     key_compat_neutral: float = 0.6
