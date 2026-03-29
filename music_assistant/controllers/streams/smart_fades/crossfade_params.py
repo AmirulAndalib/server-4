@@ -48,6 +48,11 @@ def resolve_crossfade_params(
     key_in = _extract_key(fade_in_analysis.musical_key)
     key_compat = _resolve_key_compat(key_out, key_in, config)
 
+    if logger:
+        _log_key_debug(
+            logger, fade_out_analysis, fade_in_analysis, key_out, key_in, key_compat, config
+        )
+
     if stretch.bpm_diff_percent > config.stretch_threshold_pct:
         return _resolve_path_a(key_compat, config, logger)
 
@@ -132,6 +137,57 @@ def _resolve_key_compat(
     ):
         return config.key_compat_neutral
     return key_out.compatibility_score(key_in)
+
+
+def _log_key_debug(
+    logger: logging.Logger,
+    fade_out_analysis: AudioAnalysisData,
+    fade_in_analysis: AudioAnalysisData,
+    key_out: MusicalKey | None,
+    key_in: MusicalKey | None,
+    key_compat: float,
+    config: CrossfadeConfig,
+) -> None:
+    """Log detailed key compatibility debug info."""
+    raw_out = fade_out_analysis.musical_key
+    raw_in = fade_in_analysis.musical_key
+
+    if key_out is None or key_in is None:
+        logger.debug(
+            "Key compat: %.2f (neutral fallback) — raw_out=%s, raw_in=%s, "
+            "extracted_out=%s, extracted_in=%s",
+            key_compat,
+            raw_out,
+            raw_in,
+            key_out,
+            key_in,
+        )
+        return
+
+    gated = (
+        key_out.confidence < config.key_confidence_threshold
+        or key_in.confidence < config.key_confidence_threshold
+    )
+    raw_score = key_out.compatibility_score(key_in)
+
+    logger.debug(
+        "Key compat: %.2f — out=%s %s (conf=%.2f, camelot=%s), "
+        "in=%s %s (conf=%.2f, camelot=%s), raw_score=%.2f%s",
+        key_compat,
+        key_out.root,
+        key_out.mode,
+        key_out.confidence,
+        key_out.camelot_code or "?",
+        key_in.root,
+        key_in.mode,
+        key_in.confidence,
+        key_in.camelot_code or "?",
+        raw_score,
+        f" (gated to neutral {config.key_compat_neutral}"
+        f" — confidence below {config.key_confidence_threshold})"
+        if gated
+        else "",
+    )
 
 
 def _avg_centroid(
