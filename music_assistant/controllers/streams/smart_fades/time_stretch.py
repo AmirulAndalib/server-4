@@ -7,31 +7,20 @@ and compensates alignment positions for the stretch ratio.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, replace
+from dataclasses import replace
 
 import numpy as np
 import numpy.typing as npt
 
-from music_assistant.controllers.streams.smart_fades.alignment import AlignmentResult
 from music_assistant.controllers.streams.smart_fades.helpers import (
     SMART_CROSSFADE_DURATION,
     get_bpm_diff_percentage,
 )
+from music_assistant.controllers.streams.smart_fades.models import (
+    AlignmentResult,
+    TimeStretchDecision,
+)
 from music_assistant.models.audio_analysis import AudioAnalysisData
-
-
-@dataclass
-class TimeStretchDecision:
-    """Result of the time-stretch decision.
-
-    If apply is True, the outgoing track should be time-stretched by bpm_ratio.
-    tempo_steps contains S-curve steps for gradual stretch, or None for instant stretch.
-    """
-
-    apply: bool
-    bpm_ratio: float
-    bpm_diff_percent: float
-    tempo_steps: list[tuple[float, float]] | None
 
 
 def resolve_time_stretch(

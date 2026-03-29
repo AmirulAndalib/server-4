@@ -7,7 +7,6 @@ an AlignmentResult with positions in source-audio time (unstretched).
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
 
 import numpy as np
 import numpy.typing as npt
@@ -18,7 +17,10 @@ from music_assistant.controllers.streams.smart_fades.helpers import (
     extrapolate_downbeats,
     get_bpm_diff_percentage,
 )
+from music_assistant.controllers.streams.smart_fades.models import AlignmentResult
 from music_assistant.models.audio_analysis import AudioAnalysisData
+
+__all__ = ["AlignmentResult", "resolve_alignment"]
 
 logger = logging.getLogger(__name__)
 
@@ -38,22 +40,6 @@ _LOW_ENERGY_GUARD = 0.5
 _SPECTRAL_SMOOTH_WINDOW = 5
 _SPECTRAL_DECLINE_THRESHOLD = 0.75
 _SPECTRAL_REMAINING_AVG_GUARD = 0.85
-
-
-@dataclass
-class AlignmentResult:
-    """Result of crossfade alignment resolution.
-
-    All positions are in source-audio time (unstretched).
-    Compensation for time-stretching happens separately via compensate_for_stretch().
-    """
-
-    strategy: str
-    fadeout_start_pos: float | None
-    fadein_start_pos: float | None
-    crossfade_duration: float
-    curve_type: str | None
-    fadeout_downbeats_rel: npt.NDArray[np.float64]
 
 
 def resolve_alignment(

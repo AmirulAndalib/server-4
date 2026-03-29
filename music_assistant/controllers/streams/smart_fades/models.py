@@ -7,6 +7,11 @@ Logic stays in its own files (alignment.py, time_stretch.py, crossfade_params.py
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import numpy as np
+    import numpy.typing as npt
 
 
 @dataclass
@@ -107,6 +112,36 @@ _CAMELOT_WHEEL: dict[tuple[str, str], str] = {
     ("c#", "minor"): "12A",
     ("db", "minor"): "12A",
 }
+
+
+@dataclass
+class AlignmentResult:
+    """Result of crossfade alignment resolution.
+
+    All positions are in source-audio time (unstretched).
+    Compensation for time-stretching happens separately via compensate_for_stretch().
+    """
+
+    strategy: str
+    fadeout_start_pos: float | None
+    fadein_start_pos: float | None
+    crossfade_duration: float
+    curve_type: str | None
+    fadeout_downbeats_rel: npt.NDArray[np.float64]
+
+
+@dataclass
+class TimeStretchDecision:
+    """Result of the time-stretch decision.
+
+    If apply is True, the outgoing track should be time-stretched by bpm_ratio.
+    tempo_steps contains S-curve steps for gradual stretch, or None for instant stretch.
+    """
+
+    apply: bool
+    bpm_ratio: float
+    bpm_diff_percent: float
+    tempo_steps: list[tuple[float, float]] | None
 
 
 @dataclass

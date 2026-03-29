@@ -12,7 +12,6 @@ import shortuuid
 
 from music_assistant.constants import VERBOSE_LOG_LEVEL
 from music_assistant.controllers.streams.smart_fades.alignment import (
-    AlignmentResult,
     resolve_alignment,
 )
 from music_assistant.controllers.streams.smart_fades.filters import (
@@ -27,8 +26,11 @@ from music_assistant.controllers.streams.smart_fades.filters import (
 from music_assistant.controllers.streams.smart_fades.helpers import (
     SMART_CROSSFADE_DURATION,
 )
-from music_assistant.controllers.streams.smart_fades.time_stretch import (
+from music_assistant.controllers.streams.smart_fades.models import (
+    AlignmentResult,
     TimeStretchDecision,
+)
+from music_assistant.controllers.streams.smart_fades.time_stretch import (
     compensate_for_stretch,
     resolve_time_stretch,
 )
