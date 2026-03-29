@@ -65,7 +65,7 @@ def resolve_time_stretch(
     )
 
     # Only stretch if diff is meaningful but within threshold
-    energy_aligned = alignment.strategy in ("energy", "spectral", "energy_partial")
+    energy_aligned = alignment.strategy in ("energy", "spectral")
     if not (0.1 < bpm_diff_percent <= threshold_percent):
         return no_stretch
 

@@ -189,40 +189,14 @@ def _try_energy_alignment(
     fadeout_start = _find_fadeout_start(energy_out, fadeout_downbeats_rel, bpm=fade_out_bpm)
     fadein_entry = _find_fadein_entry(energy_in, fadein_downbeats_rel)
 
-    if fadeout_start is None and fadein_entry is None:
-        if logger:
-            logger.debug("Energy alignment failed: both fadeout and fadein returned None")
-        return None
-
-    if fadeout_start is None:
-        if logger:
-            logger.debug("Energy alignment failed: fadeout_start=None")
-        return None
-
-    # Fadein failed but fadeout succeeded — partial alignment
-    if fadein_entry is None:
-        fadein_entry = float(fadein_downbeats_rel[0]) if len(fadein_downbeats_rel) > 0 else 0.0
-        bar_duration = 4.0 * (60.0 / fade_in_bpm)
-        crossfade_duration = 8 * bar_duration
-        bpm_diff_percent = get_bpm_diff_percentage(fade_out_bpm, fade_in_bpm)
-        crossfade_duration = _clamp_duration_by_bpm(
-            crossfade_duration, fade_in_bpm, bpm_diff_percent, logger
-        )
+    if fadeout_start is None or fadein_entry is None:
         if logger:
             logger.debug(
-                "Energy alignment partial: fadeout_start=%.1fs, "
-                "fadein defaulted to first downbeat=%.1fs, duration=%.1fs (8 bars capped)",
-                fadeout_start,
-                fadein_entry,
-                crossfade_duration,
+                "Energy alignment failed: fadeout_start=%s, fadein_entry=%s",
+                f"{fadeout_start:.1f}s" if fadeout_start is not None else "None (no clear decline)",
+                f"{fadein_entry:.1f}s" if fadein_entry is not None else "None (no clear build)",
             )
-        return AlignmentResult(
-            strategy="energy_partial",
-            fadeout_start_pos=fadeout_start,
-            fadein_start_pos=fadein_entry,
-            crossfade_duration=crossfade_duration,
-            fadeout_downbeats_rel=fadeout_downbeats_rel,
-        )
+        return None
 
     crossfade_duration = _calculate_energy_crossfade_duration(
         energy_out=energy_out,
