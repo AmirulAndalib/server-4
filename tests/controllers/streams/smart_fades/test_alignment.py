@@ -5,6 +5,7 @@ import numpy as np
 from music_assistant.controllers.streams.smart_fades.alignment import (
     AlignmentResult,
     _calculate_energy_crossfade_duration,
+    _characterize_incoming,
     _clamp_duration_by_bpm,
     _find_fadein_entry,
     _find_knee,
@@ -447,3 +448,35 @@ def test_snap_to_phrase_boundary_few_downbeats() -> None:
     # Falls back to _snap_to_downbeat since < 8 downbeats
     assert result is not None
     assert result == 4.0, f"Expected downbeat snap at 4.0s, got {result}"
+
+
+def test_characterize_incoming_quiet_intro() -> None:
+    """Track with quiet intro should be detected."""
+    energy = np.zeros(45, dtype=np.float32)
+    energy[:15] = 0.05
+    energy[15:] = 0.8
+
+    result = _characterize_incoming(energy)
+
+    assert result["has_quiet_intro"] is True
+    assert result["entry_energy"] < 0.15
+
+
+def test_characterize_incoming_loud_start() -> None:
+    """Track starting loud should not be detected as quiet intro."""
+    energy = np.zeros(45, dtype=np.float32)
+    energy[:5] = np.linspace(0.27, 0.91, 5).astype(np.float32)
+    energy[5:] = 0.91
+
+    result = _characterize_incoming(energy)
+
+    assert result["has_quiet_intro"] is False
+    assert result["entry_energy"] > 0.15
+
+
+def test_characterize_incoming_none_curve() -> None:
+    """No energy curve returns neutral characterization."""
+    result = _characterize_incoming(None)
+
+    assert result["has_quiet_intro"] is False
+    assert result["entry_energy"] == 0.5

@@ -7,6 +7,7 @@ an AlignmentResult with positions in source-audio time (unstretched).
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 import numpy as np
 import numpy.typing as npt
@@ -48,6 +49,10 @@ _MAX_RISE_GRADIENT = 0.10
 _SPECTRAL_SMOOTH_WINDOW = 5
 _SPECTRAL_DECLINE_THRESHOLD = 0.75
 _SPECTRAL_REMAINING_AVG_GUARD = 0.85
+
+# Incoming track characterization constants
+_QUIET_INTRO_THRESHOLD = 0.15
+_QUIET_INTRO_WINDOW = 10
 
 
 def resolve_alignment(
@@ -498,6 +503,24 @@ def _find_knee(
     if snapped is None:
         return None
     return (snapped, float(knee_idx))
+
+
+def _characterize_incoming(
+    energy_head: npt.NDArray[np.float32] | None,
+) -> dict[str, Any]:
+    """Characterize the incoming track's opening for crossfade aggressiveness.
+
+    :param energy_head: Per-second energy for the incoming track buffer, or None.
+    :return: Dict with 'has_quiet_intro' (bool) and 'entry_energy' (float).
+    """
+    if energy_head is None or len(energy_head) == 0:
+        return {"has_quiet_intro": False, "entry_energy": 0.5}
+
+    window = min(_QUIET_INTRO_WINDOW, len(energy_head))
+    entry_energy = float(np.mean(energy_head[:window]))
+    has_quiet_intro = entry_energy < _QUIET_INTRO_THRESHOLD
+
+    return {"has_quiet_intro": has_quiet_intro, "entry_energy": entry_energy}
 
 
 def _find_fadein_entry(
