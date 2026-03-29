@@ -41,11 +41,11 @@ def test_resolve_alignment_energy_path() -> None:
     out_energy = np.ones(180, dtype=np.float32) * 0.9
     out_energy[155:] = np.linspace(0.9, 0.1, 25).astype(np.float32)
 
-    # Song B: quiet for 10s, then build
+    # Song B: quiet intro for 15s, then gradual 25s build
     in_energy = np.zeros(180, dtype=np.float32)
-    in_energy[:10] = 0.1
-    in_energy[10:25] = np.linspace(0.1, 0.9, 15).astype(np.float32)
-    in_energy[25:] = 0.9
+    in_energy[:15] = 0.05
+    in_energy[15:40] = np.linspace(0.05, 0.8, 25).astype(np.float32)
+    in_energy[40:] = 0.8
 
     fade_out = _make_analysis(energy_curve=out_energy)
     fade_in = _make_analysis(energy_curve=in_energy)
@@ -68,11 +68,11 @@ def test_resolve_alignment_spectral_fallback() -> None:
     out_spectral = np.ones(180, dtype=np.float32) * 3000.0
     out_spectral[155:] = np.linspace(3000.0, 500.0, 25).astype(np.float32)
 
-    # Song B: dim for 10s, then brightness rises
+    # Song B: dim for 15s, then brightness rises gradually over 25s
     in_spectral = np.ones(180, dtype=np.float32) * 500.0
-    in_spectral[:10] = 500.0
-    in_spectral[10:25] = np.linspace(500.0, 3000.0, 15).astype(np.float32)
-    in_spectral[25:] = 3000.0
+    in_spectral[:15] = 500.0
+    in_spectral[15:40] = np.linspace(500.0, 3000.0, 25).astype(np.float32)
+    in_spectral[40:] = 3000.0
 
     fade_out = _make_analysis(energy_curve=flat_energy, spectral_centroid_curve=out_spectral)
     fade_in = _make_analysis(energy_curve=flat_energy, spectral_centroid_curve=in_spectral)
@@ -175,24 +175,82 @@ def test_find_fadeout_start_flat_energy() -> None:
 
 def test_find_fadein_entry_clear_build() -> None:
     """Should find the entry point in the quiet section before the rise."""
-    # 45 seconds: quiet for 10s, then build to full energy
+    # 45 seconds: quiet intro for 15s, then gradual 25s build
     energy = np.zeros(45, dtype=np.float32)
-    energy[:10] = 0.1
-    energy[10:25] = np.linspace(0.1, 0.9, 15).astype(np.float32)
-    energy[25:] = 0.9
+    energy[:15] = 0.05
+    energy[15:40] = np.linspace(0.05, 0.8, 25).astype(np.float32)
+    energy[40:] = 0.8
     downbeats = np.arange(0, 45, 2.0)
 
     result = _find_fadein_entry(energy, downbeats)
 
-    # Should enter in the quiet section well before the build (~sec 0-10)
+    # Should enter in the quiet section before the build
     assert result is not None
-    assert 0 <= result <= 12, f"Expected entry around 0-12s, got {result}"
+    assert 0 <= result <= 16, f"Expected entry around 0-16s, got {result}"
 
 
 def test_find_fadein_entry_already_loud() -> None:
     """Track that starts loud should return None (fallback)."""
     energy = np.ones(45, dtype=np.float32) * 0.9
     downbeats = np.arange(0, 45, 2.0)
+
+    result = _find_fadein_entry(energy, downbeats)
+
+    assert result is None
+
+
+def test_find_fadein_entry_edm_predrop_rejected() -> None:
+    """EDM pre-drop section (high starting energy, steep rise) should return None."""
+    energy = np.zeros(45, dtype=np.float32)
+    energy[:4] = np.linspace(0.27, 0.91, 4).astype(np.float32)
+    energy[4:] = 0.91
+    downbeats = np.arange(0, 45, 2.0)
+
+    result = _find_fadein_entry(energy, downbeats)
+
+    assert result is None
+
+
+def test_find_fadein_entry_flat_quiet_no_rise() -> None:
+    """Uniformly quiet track (no rise after quiet region) should return None."""
+    energy = np.ones(45, dtype=np.float32) * 0.06
+    downbeats = np.arange(0, 45, 2.0)
+
+    result = _find_fadein_entry(energy, downbeats)
+
+    assert result is None
+
+
+def test_find_fadein_entry_prefers_earliest_region() -> None:
+    """With intro and breakdown, should pick the intro (earliest)."""
+    energy = np.zeros(45, dtype=np.float32)
+    energy[:10] = 0.05
+    energy[10:25] = 0.80
+    energy[25:35] = 0.05
+    energy[35:] = 0.80
+    downbeats = np.arange(0, 45, 2.0)
+
+    result = _find_fadein_entry(energy, downbeats)
+
+    assert result is not None
+    assert result <= 10, f"Expected entry in intro (sec 0-10), got {result}"
+
+
+def test_find_fadein_entry_short_dip_rejected() -> None:
+    """A 3-second energy dip should not qualify as an entry region."""
+    energy = np.ones(45, dtype=np.float32) * 0.70
+    energy[20:23] = 0.05
+    downbeats = np.arange(0, 45, 2.0)
+
+    result = _find_fadein_entry(energy, downbeats)
+
+    assert result is None
+
+
+def test_find_fadein_entry_too_short_input() -> None:
+    """Input shorter than MIN_QUIET_SUSTAIN + DROP_CHECK_WINDOW should return None."""
+    energy = np.array([0.05] * 10, dtype=np.float32)
+    downbeats = np.arange(0, 10, 2.0)
 
     result = _find_fadein_entry(energy, downbeats)
 
@@ -284,16 +342,17 @@ def test_find_spectral_fadeout_start_noisy_with_trend() -> None:
 
 def test_find_spectral_fadein_entry_rising() -> None:
     """Rising spectral centroid should find entry before the rise."""
+    # 15s dim, then gradual 25s brightness build
     spectral = np.ones(45, dtype=np.float32) * 500.0
-    spectral[:10] = 500.0
-    spectral[10:25] = np.linspace(500.0, 3000.0, 15).astype(np.float32)
-    spectral[25:] = 3000.0
+    spectral[:15] = 500.0
+    spectral[15:40] = np.linspace(500.0, 3000.0, 25).astype(np.float32)
+    spectral[40:] = 3000.0
     downbeats = np.arange(0, 45, 2.0)
 
     result = _find_spectral_fadein_entry(spectral, downbeats)
 
     assert result is not None
-    assert 0 <= result <= 12, f"Expected entry around 0-12s, got {result}"
+    assert 0 <= result <= 16, f"Expected entry around 0-16s, got {result}"
 
 
 def test_find_spectral_fadein_entry_flat() -> None:

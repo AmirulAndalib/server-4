@@ -29,12 +29,20 @@ logger = logging.getLogger(__name__)
 _SMOOTH_WINDOW = 3
 # Energy must drop below this fraction of peak to be considered "declining"
 _DECLINE_THRESHOLD = 0.85
-# Minimum sustained positive gradient to detect a "build" (per second)
-_RISE_GRADIENT = 0.05
-# Number of consecutive seconds of positive gradient needed
-_RISE_SUSTAINED = 3
 # Entry point must be below this fraction of track peak to be "low energy"
-_LOW_ENERGY_GUARD = 0.5
+_LOW_ENERGY_GUARD = 0.20
+# Absolute energy ceiling — nothing above this is "quiet" regardless of track peak
+_LOW_ENERGY_ABSOLUTE = 0.20
+# Minimum sustained quiet region duration (seconds)
+_MIN_QUIET_SUSTAIN = 5
+# Seconds after quiet region to verify energy rises (confirms intro, not dead silence)
+_POST_QUIET_WINDOW = 15
+# Post-quiet mean energy must exceed quiet region mean by this factor
+_POST_QUIET_RISE_THRESHOLD = 1.5
+# Seconds after quiet region to measure gradient for drop rejection
+_DROP_CHECK_WINDOW = 8
+# Mean gradient above this per second = drop ramp, not intro build
+_MAX_RISE_GRADIENT = 0.10
 
 # Spectral centroid constants (noisier signal, needs wider window + looser thresholds)
 _SPECTRAL_SMOOTH_WINDOW = 5
@@ -492,91 +500,164 @@ def _find_fadein_entry(
     energy_head: npt.NDArray[np.float32],
     downbeats: npt.NDArray[np.float64],
 ) -> float | None:
-    """Find where the incoming track is low-energy and about to rise.
+    """Find a quiet intro region in the incoming track suitable for crossfade entry.
 
-    Finds the first sustained positive gradient in the smoothed energy
-    curve, verifies that absolute energy is low at that point, and
-    snaps to the nearest downbeat before the rise.
+    Scans the energy curve for sustained low-energy regions, then verifies
+    that energy rises afterward (confirming an intro build rather than
+    silence or a flat quiet track). Rejects regions followed by steep
+    rises (drops rather than gradual builds).
 
-    :param energy_head: Per-second energy for the first ~45s of the track (buffer-relative).
+    :param energy_head: Per-second energy for the incoming track (buffer-relative).
     :param downbeats: Downbeat timestamps in buffer-relative seconds.
-    :return: Fade-in entry time in buffer-relative seconds, or None if no clear build.
+    :return: Fade-in entry time in buffer-relative seconds, or None if no suitable region.
     """
-    if len(energy_head) < _RISE_SUSTAINED + 2:
+    if len(energy_head) < _MIN_QUIET_SUSTAIN + _DROP_CHECK_WINDOW:
         logger.debug("fadein_entry: too short (%d values)", len(energy_head))
         return None
 
     smoothed = _smooth(energy_head)
-    gradient = np.gradient(smoothed)
+    return _find_quiet_region_entry(smoothed, downbeats, _SMOOTH_WINDOW, "fadein_entry")
+
+
+def _find_quiet_region_entry(
+    smoothed: npt.NDArray[np.float32],
+    downbeats: npt.NDArray[np.float64],
+    smooth_window: int,
+    label: str,
+) -> float | None:
+    """Find the earliest sustained quiet region followed by a gradual energy rise.
+
+    Core algorithm shared by energy and spectral fadein entry detection.
+
+    :param smoothed: Smoothed per-second signal (energy or normalized spectral), 0-1.
+    :param downbeats: Downbeat timestamps in buffer-relative seconds.
+    :param smooth_window: Smoothing window size (for edge artifact masking).
+    :param label: Log label ('fadein_entry' or 'spectral_fadein').
+    """
     track_peak = float(np.max(smoothed))
 
     logger.debug(
-        "fadein_entry: smoothed peak=%.3f, head energy=[%s...%s]",
+        "%s: smoothed peak=%.3f, head=[%s...%s]",
+        label,
         track_peak,
         ", ".join(f"{v:.2f}" for v in smoothed[:5]),
         ", ".join(f"{v:.2f}" for v in smoothed[-5:]),
     )
 
     if track_peak < 0.05:
-        logger.debug("fadein_entry: near-silence (peak=%.3f), returning None", track_peak)
+        logger.debug("%s: near-silence (peak=%.3f), returning None", label, track_peak)
         return None
 
-    # Find first sustained positive gradient (building energy)
-    for i in range(len(gradient) - _RISE_SUSTAINED):
-        if all(gradient[i : i + _RISE_SUSTAINED] > _RISE_GRADIENT):
-            # Verify energy is actually low here (guard against "already loud" sections)
-            if smoothed[i] > track_peak * _LOW_ENERGY_GUARD:
+    # Step 1: compute quiet ceiling (dual threshold)
+    quiet_ceiling = min(_LOW_ENERGY_ABSOLUTE, track_peak * _LOW_ENERGY_GUARD)
+
+    # Step 2: find quiet indices, masking smoothing edge artifacts
+    edge_skip = smooth_window // 2
+    quiet_mask = smoothed <= quiet_ceiling
+    quiet_mask[:edge_skip] = False
+    quiet_indices = np.where(quiet_mask)[0]
+
+    if len(quiet_indices) == 0:
+        min_energy = float(np.min(smoothed[edge_skip:])) if len(smoothed) > edge_skip else 0
+        logger.debug(
+            "%s: no quiet region (ceiling=%.3f, min_energy=%.3f)", label, quiet_ceiling, min_energy
+        )
+        return None
+
+    # Step 3: group consecutive quiet indices into contiguous regions
+    gaps = np.where(np.diff(quiet_indices) > 1)[0]
+    regions = np.split(quiet_indices, gaps + 1)
+
+    # Step 4: filter by minimum duration, keep positional order (earliest first)
+    candidates = [(int(r[0]), int(r[-1])) for r in regions if len(r) >= _MIN_QUIET_SUSTAIN]
+
+    if not candidates:
+        longest = max(len(r) for r in regions)
+        logger.debug(
+            "%s: %d quiet region(s) but none >= %ds (longest=%ds)",
+            label,
+            len(regions),
+            _MIN_QUIET_SUSTAIN,
+            longest,
+        )
+        return None
+
+    logger.debug(
+        "%s: %d candidate quiet region(s), ceiling=%.3f", label, len(candidates), quiet_ceiling
+    )
+
+    # Step 5: evaluate each candidate (earliest first)
+    for region_start, region_end in candidates:
+        region_len = region_end - region_start + 1
+        quiet_mean = float(np.mean(smoothed[region_start : region_end + 1]))
+
+        post_start = region_end + 1
+        if post_start >= len(smoothed):
+            logger.debug(
+                "%s: quiet sec %d-%d (%ds) extends to buffer end, skip",
+                label,
+                region_start,
+                region_end,
+                region_len,
+            )
+            continue
+
+        # Rise verification: mean energy after must exceed quiet mean by threshold factor
+        post_end = min(post_start + _POST_QUIET_WINDOW, len(smoothed))
+        post_mean = float(np.mean(smoothed[post_start:post_end]))
+        rise_floor = quiet_mean * _POST_QUIET_RISE_THRESHOLD
+
+        if post_mean < rise_floor:
+            logger.debug(
+                "%s: quiet sec %d-%d (mean=%.3f) — post mean=%.3f < rise floor %.3f (%.1fx), skip",
+                label,
+                region_start,
+                region_end,
+                quiet_mean,
+                post_mean,
+                rise_floor,
+                _POST_QUIET_RISE_THRESHOLD,
+            )
+            continue
+
+        # Drop rejection: mean gradient in first N seconds after quiet must not be too steep
+        drop_end = min(post_start + _DROP_CHECK_WINDOW, len(smoothed))
+        mean_grad = 0.0
+        if drop_end - post_start >= 2:
+            post_gradient = np.gradient(smoothed[post_start:drop_end])
+            mean_grad = float(np.mean(post_gradient))
+            if mean_grad > _MAX_RISE_GRADIENT:
                 logger.debug(
-                    "fadein_entry: sustained rise at sec %d but energy=%.3f "
-                    "> guard %.3f (50%% of peak), skipping",
-                    i,
-                    float(smoothed[i]),
-                    track_peak * _LOW_ENERGY_GUARD,
+                    "%s: quiet sec %d-%d — post gradient=%.3f > %.3f (drop), skip",
+                    label,
+                    region_start,
+                    region_end,
+                    mean_grad,
+                    _MAX_RISE_GRADIENT,
                 )
                 continue
 
-            # Back up into Song B's quiet section before the rise begins.
-            # A DJ would start the incoming track during its intro/ambient section,
-            # letting it play softly for several bars before the energy build.
-            # Look for a quiet region before the rise (energy below 20% of peak).
-            quiet_threshold = track_peak * 0.2
-            quiet_start = i
-            for j in range(i - 1, -1, -1):
-                if smoothed[j] <= quiet_threshold:
-                    quiet_start = j
-                    break
-                # Don't go back more than 20 seconds from the rise
-                if i - j > 20:
-                    quiet_start = j
-                    break
+        # All checks passed — snap entry to phrase boundary
+        entry_idx = float(region_start)
+        snapped = _snap_to_phrase_boundary(entry_idx, downbeats, direction="backward")
+        if snapped is None:
+            snapped = _snap_to_phrase_boundary(entry_idx, downbeats, direction="forward")
 
-            entry_idx = max(0, quiet_start)
-            snapped = _snap_to_phrase_boundary(float(entry_idx), downbeats, direction="backward")
-            if snapped is None:
-                snapped = _snap_to_phrase_boundary(float(entry_idx), downbeats, direction="forward")
-            logger.debug(
-                "fadein_entry: rise detected at sec %d (energy=%.3f, gradient=[%.3f,%.3f,%.3f]), "
-                "quiet_start=%d, entry_idx=%d, snapped=%.1fs",
-                i,
-                float(smoothed[i]),
-                float(gradient[i]),
-                float(gradient[i + 1]),
-                float(gradient[i + 2]),
-                quiet_start,
-                entry_idx,
-                snapped if snapped is not None else -1,
-            )
-            return snapped
+        logger.debug(
+            "%s: ACCEPTED quiet sec %d-%d (%ds, mean=%.3f), "
+            "post_mean=%.3f, gradient=%.3f, snapped=%.1fs",
+            label,
+            region_start,
+            region_end,
+            region_len,
+            quiet_mean,
+            post_mean,
+            mean_grad,
+            snapped if snapped is not None else -1,
+        )
+        return snapped
 
-    logger.debug(
-        "fadein_entry: no sustained rise > %.3f found in %d seconds. "
-        "Max gradient=%.3f at sec %d. Low energy guard=%.3f",
-        _RISE_GRADIENT,
-        len(gradient),
-        float(np.max(gradient)),
-        int(np.argmax(gradient)),
-        track_peak * _LOW_ENERGY_GUARD,
-    )
+    logger.debug("%s: %d candidate(s) evaluated, none passed", label, len(candidates))
     return None
 
 
@@ -777,70 +858,22 @@ def _find_spectral_fadein_entry(
     spectral_head: npt.NDArray[np.float32],
     downbeats: npt.NDArray[np.float64],
 ) -> float | None:
-    """Find where the incoming track's spectral brightness begins rising.
+    """Find a quiet spectral region in the incoming track suitable for crossfade entry.
 
-    Same logic as _find_fadein_entry but operates on the spectral centroid
-    curve with wider smoothing.
+    Same algorithm as _find_fadein_entry but operates on normalized spectral
+    centroid with wider smoothing.
 
-    :param spectral_head: Per-second spectral centroid for the first ~45s (buffer-relative).
+    :param spectral_head: Per-second spectral centroid for the incoming track (buffer-relative).
     :param downbeats: Downbeat timestamps in buffer-relative seconds.
-    :return: Fade-in entry time in buffer-relative seconds, or None if no clear build.
+    :return: Fade-in entry time in buffer-relative seconds, or None if no suitable region.
     """
-    if len(spectral_head) < _RISE_SUSTAINED + 2:
+    if len(spectral_head) < _MIN_QUIET_SUSTAIN + _DROP_CHECK_WINDOW:
         logger.debug("spectral_fadein: too short (%d values)", len(spectral_head))
         return None
 
     normalized = _normalize_spectral(spectral_head)
     smoothed = _smooth(normalized, window=_SPECTRAL_SMOOTH_WINDOW)
-    gradient = np.gradient(smoothed)
-    track_peak = float(np.max(smoothed))
-
-    if track_peak < 0.05:
-        logger.debug("spectral_fadein: near-flat (peak=%.3f), returning None", track_peak)
-        return None
-
-    for i in range(len(gradient) - _RISE_SUSTAINED):
-        if all(gradient[i : i + _RISE_SUSTAINED] > _RISE_GRADIENT):
-            if smoothed[i] > track_peak * _LOW_ENERGY_GUARD:
-                logger.debug(
-                    "spectral_fadein: rise at sec %d but brightness=%.3f > guard %.3f, skip",
-                    i,
-                    float(smoothed[i]),
-                    track_peak * _LOW_ENERGY_GUARD,
-                )
-                continue
-
-            quiet_threshold = track_peak * 0.2
-            quiet_start = i
-            for j in range(i - 1, -1, -1):
-                if smoothed[j] <= quiet_threshold:
-                    quiet_start = j
-                    break
-                if i - j > 20:
-                    quiet_start = j
-                    break
-
-            entry_idx = max(0, quiet_start)
-            snapped = _snap_to_phrase_boundary(float(entry_idx), downbeats, direction="backward")
-            if snapped is None:
-                snapped = _snap_to_phrase_boundary(float(entry_idx), downbeats, direction="forward")
-            logger.debug(
-                "spectral_fadein: rise at sec %d (brightness=%.3f), "
-                "quiet_start=%d, entry_idx=%d, snapped=%.1fs",
-                i,
-                float(smoothed[i]),
-                quiet_start,
-                entry_idx,
-                snapped if snapped is not None else -1,
-            )
-            return snapped
-
-    logger.debug(
-        "spectral_fadein: no sustained rise > %.3f found in %d seconds",
-        _RISE_GRADIENT,
-        len(gradient),
-    )
-    return None
+    return _find_quiet_region_entry(smoothed, downbeats, _SPECTRAL_SMOOTH_WINDOW, "spectral_fadein")
 
 
 def _calculate_optimal_crossfade_bars(
