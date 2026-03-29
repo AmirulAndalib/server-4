@@ -252,8 +252,13 @@ class SmartCrossFade(SmartFade):
 
         energy_aligned = alignment.strategy in ("energy", "spectral")
         crossover_freq = params.crossover_freq
-        fadeout_curve = params.curve_type
-        fadein_curve = params.curve_type
+        curve_type = params.curve_type
+
+        # Cap crossfade duration: resolver limits based on key/spectral,
+        # alignment limits based on available audio and energy positioning
+        crossfade_duration = min(alignment.crossfade_duration, params.fade_seconds)
+        fadeout_curve = curve_type
+        fadein_curve = curve_type
 
         # Time stretch filter
         if stretch.apply:
@@ -267,8 +272,7 @@ class SmartCrossFade(SmartFade):
         # Beat alignment trim
         if (
             alignment.fadein_start_pos is not None
-            and alignment.fadein_start_pos + alignment.crossfade_duration
-            <= SMART_CROSSFADE_DURATION
+            and alignment.fadein_start_pos + crossfade_duration <= SMART_CROSSFADE_DURATION
         ):
             self.filters.append(
                 TrimFilter(logger=self.logger, fadein_start_pos=alignment.fadein_start_pos)
@@ -278,24 +282,22 @@ class SmartCrossFade(SmartFade):
                 VERBOSE_LOG_LEVEL,
                 "Skipping beat alignment: not enough audio after trim (%.1fs + %.1fs > %.1fs)",
                 alignment.fadein_start_pos,
-                alignment.crossfade_duration,
+                crossfade_duration,
                 SMART_CROSSFADE_DURATION,
             )
 
         # Fadeout end position (energy-aligned path)
         fadeout_end_pos: float | None = None
         if energy_aligned and alignment.fadeout_start_pos is not None:
-            fadeout_end_pos = alignment.fadeout_start_pos + alignment.crossfade_duration
+            fadeout_end_pos = alignment.fadeout_start_pos + crossfade_duration
             fadeout_end_pos = min(fadeout_end_pos, SMART_CROSSFADE_DURATION)
 
         # Lowpass on outgoing track
         if fadeout_end_pos is not None:
-            fadeout_eq_duration = min(max(alignment.crossfade_duration * 2.5, 8.0), fadeout_end_pos)
+            fadeout_eq_duration = min(max(crossfade_duration * 2.5, 8.0), fadeout_end_pos)
             fadeout_eq_start = max(0, fadeout_end_pos - fadeout_eq_duration)
         else:
-            fadeout_eq_duration = min(
-                max(alignment.crossfade_duration * 2.5, 8.0), SMART_CROSSFADE_DURATION
-            )
+            fadeout_eq_duration = min(max(crossfade_duration * 2.5, 8.0), SMART_CROSSFADE_DURATION)
             fadeout_eq_start = max(0, SMART_CROSSFADE_DURATION - fadeout_eq_duration)
 
         self.filters.append(
@@ -313,7 +315,7 @@ class SmartCrossFade(SmartFade):
         )
 
         # Highpass on incoming track
-        fadein_eq_duration = alignment.crossfade_duration / 1.5
+        fadein_eq_duration = crossfade_duration / 1.5
         self.filters.append(
             FrequencySweepFilter(
                 logger=self.logger,
@@ -338,8 +340,8 @@ class SmartCrossFade(SmartFade):
         self.filters.append(
             CrossfadeFilter(
                 logger=self.logger,
-                crossfade_duration=alignment.crossfade_duration,
-                curve_type=alignment.curve_type,
+                crossfade_duration=crossfade_duration,
+                curve_type=curve_type,
             )
         )
 
