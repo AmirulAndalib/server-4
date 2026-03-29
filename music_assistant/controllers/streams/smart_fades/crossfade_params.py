@@ -49,9 +49,7 @@ def resolve_crossfade_params(
     key_compat = _resolve_key_compat(key_out, key_in, config)
 
     if logger:
-        _log_key_debug(
-            logger, fade_out_analysis, fade_in_analysis, key_out, key_in, key_compat, config
-        )
+        _log_key_debug(logger, fade_out_analysis, fade_in_analysis, key_out, key_in, key_compat)
 
     if stretch.bpm_diff_percent > config.stretch_threshold_pct:
         return _resolve_path_a(key_compat, config, logger)
@@ -123,18 +121,13 @@ def _resolve_key_compat(
     key_in: MusicalKey | None,
     config: CrossfadeConfig,
 ) -> float:
-    """Resolve key compatibility with confidence gate.
+    """Resolve key compatibility, falling back to neutral when keys are absent.
 
     :param key_out: Outgoing track's key, or None.
     :param key_in: Incoming track's key, or None.
     :param config: Crossfade configuration.
     """
     if key_out is None or key_in is None:
-        return config.key_compat_neutral
-    if (
-        key_out.confidence < config.key_confidence_threshold
-        or key_in.confidence < config.key_confidence_threshold
-    ):
         return config.key_compat_neutral
     return key_out.compatibility_score(key_in)
 
@@ -146,7 +139,6 @@ def _log_key_debug(
     key_out: MusicalKey | None,
     key_in: MusicalKey | None,
     key_compat: float,
-    config: CrossfadeConfig,
 ) -> None:
     """Log detailed key compatibility debug info."""
     raw_out = fade_out_analysis.musical_key
@@ -164,15 +156,8 @@ def _log_key_debug(
         )
         return
 
-    gated = (
-        key_out.confidence < config.key_confidence_threshold
-        or key_in.confidence < config.key_confidence_threshold
-    )
-    raw_score = key_out.compatibility_score(key_in)
-
     logger.debug(
-        "Key compat: %.2f — out=%s %s (conf=%.2f, camelot=%s), "
-        "in=%s %s (conf=%.2f, camelot=%s), raw_score=%.2f%s",
+        "Key compat: %.2f — out=%s %s (conf=%.2f, camelot=%s), in=%s %s (conf=%.2f, camelot=%s)",
         key_compat,
         key_out.root,
         key_out.mode,
@@ -182,11 +167,6 @@ def _log_key_debug(
         key_in.mode,
         key_in.confidence,
         key_in.camelot_code or "?",
-        raw_score,
-        f" (gated to neutral {config.key_compat_neutral}"
-        f" — confidence below {config.key_confidence_threshold})"
-        if gated
-        else "",
     )
 
 

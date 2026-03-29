@@ -192,8 +192,7 @@ class CrossfadeConfig:
     key_compat_linear_threshold: float = 0.5
     long_fade_linear_threshold: int = 12
 
-    # Key detection confidence gate
-    key_confidence_threshold: float = 0.4
+    # Key detection fallback
     key_compat_neutral: float = 0.6
 
 

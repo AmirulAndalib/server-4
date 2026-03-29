@@ -354,8 +354,8 @@ def test_no_spectral_still_works() -> None:
     assert 600 <= result.crossover_freq <= 3000
 
 
-def test_low_key_confidence_uses_neutral() -> None:
-    """Low confidence keys fall back to neutral compat, not incompatible."""
+def test_low_key_confidence_still_uses_score() -> None:
+    """Low confidence keys still use the actual compatibility score."""
     fade_out = _make_analysis(
         musical_key={"root": "C", "mode": "major", "confidence": 0.2},
     )
@@ -366,4 +366,6 @@ def test_low_key_confidence_uses_neutral() -> None:
     result = resolve_crossfade_params(
         fade_out_analysis=fade_out, fade_in_analysis=fade_in, stretch=stretch
     )
-    assert result.fade_bars >= 4
+    # C major (8B) to F# major (2B) = distance 6 = incompatible (0.1)
+    assert result.fade_bars <= 4
+    assert result.curve_type == "exponential"
