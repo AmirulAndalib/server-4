@@ -49,37 +49,132 @@ The energy-contour alignment in `alignment.py` (fade positioning and duration) r
 
 ## Architecture
 
-### New File: `crossfade_params.py`
+### Module Structure
+
+Two new files in `music_assistant/controllers/streams/smart_fades/`, following the existing pattern of one concept per file with a resolver function returning a dataclass result (same as `alignment.py` → `resolve_alignment()` → `AlignmentResult`, `time_stretch.py` → `resolve_time_stretch()` → `TimeStretchDecision`).
+
+#### New File: `musical_key.py`
+
+Location: `music_assistant/controllers/streams/smart_fades/musical_key.py`
+
+A self-contained module for musical key representation and harmonic compatibility scoring. **Deliberately decoupled from `AudioAnalysisData`** — this is the smart fades module's own domain concept, not a model-layer type.
+
+Contains:
+- `MusicalKey` — dataclass with `root`, `mode`, `confidence`, plus Camelot wheel logic
+- `_CAMELOT_WHEEL` — module-level lookup table (~24 entries)
+
+```python
+@dataclass
+class MusicalKey:
+    """Musical key with Camelot wheel compatibility scoring.
+
+    This is the smart fades module's own representation, constructed from
+    the raw key data in AudioAnalysisData. It is not coupled to the
+    audio analysis model.
+    """
+
+    root: str           # "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"
+    mode: str           # "major" or "minor"
+    confidence: float   # 0.0-1.0 from key detection
+
+    @property
+    def camelot_code(self) -> str | None:
+        """Return Camelot wheel code (e.g. '8B', '5A'), or None if root is unrecognized."""
+        return _CAMELOT_WHEEL.get((self.root, self.mode))
+
+    def compatibility_score(self, other: MusicalKey) -> float:
+        """Return 0.0-1.0 harmonic compatibility using Camelot wheel distance.
+
+        :param other: The other musical key to compare against.
+        """
+        ...
+```
+
+**Camelot wheel lookup table:** Maps `(root, mode)` to Camelot code. 24 entries covering all keys.
+
+```python
+_CAMELOT_WHEEL: dict[tuple[str, str], str] = {
+    ("A♭", "major"): "4B",  ("B",  "major"): "1B",  ("F#", "major"): "2B",
+    ("D♭", "major"): "3B",  ("G#", "major"): "4B",  ("E♭", "major"): "5B",
+    ("B♭", "major"): "6B",  ("F",  "major"): "7B",  ("C",  "major"): "8B",
+    ("G",  "major"): "9B",  ("D",  "major"): "10B", ("A",  "major"): "11B",
+    ("E",  "major"): "12B",
+    ("A♭", "minor"): "1A",  ("E♭", "minor"): "2A",  ("B♭", "minor"): "3A",
+    ("F",  "minor"): "4A",  ("C",  "minor"): "5A",  ("G",  "minor"): "6A",
+    ("D",  "minor"): "7A",  ("A",  "minor"): "8A",  ("E",  "minor"): "9A",
+    ("B",  "minor"): "10A", ("F#", "minor"): "11A", ("C#", "minor"): "12A",
+}
+```
+
+**Compatibility scoring algorithm:** Parses Camelot codes into number (1-12) and letter (A/B), then scores by distance:
+
+| Relationship | Distance | Score |
+|---|---|---|
+| Same key | number=0, same letter | 1.0 |
+| Adjacent position | number=1, same letter | 0.9 |
+| Relative major/minor | number=0, different letter | 0.85 |
+| Adjacent + relative | number=1, different letter | 0.8 |
+| 2 positions away | number=2, same letter | 0.5 |
+| 3 positions away | number=3, same letter | 0.2 |
+| Everything else | >3 | 0.1 |
+
+Number distance wraps: `min(abs(n1 - n2), 12 - abs(n1 - n2))`.
+
+Returns `0.1` if either key has no valid Camelot code (unrecognized root/mode).
+
+#### New File: `crossfade_params.py`
 
 Location: `music_assistant/controllers/streams/smart_fades/crossfade_params.py`
 
+Contains the unified decision logic. Follows the resolver pattern: `resolve_crossfade_params()` returns a `CrossfadeParams` dataclass.
+
 Contains:
-- `CrossfadeConfig` — all tunable parameters as a dataclass
+- `CrossfadeConfig` — all tunable parameters as a dataclass with defaults
 - `CrossfadeParams` — output dataclass
-- `CrossfadeParameterCalculator` — stateless calculator class
-- `calculate_key_compatibility()` — Camelot wheel scoring
-- `snap_to_musical_bars()` — power-of-2 bar snapping
+- `resolve_crossfade_params()` — main resolver function
+- `snap_to_musical_bars()` — power-of-2 bar snapping (public, useful for tests)
+- `_extract_key()` — constructs `MusicalKey` from raw `AudioAnalysisData.musical_key` dict
+- `_compute_energy_slopes()` — extracts gradient from energy_curve in the crossfade region
+- `_compute_spectral_overlap()` — measures spectral similarity from centroids
+- `_resolve_crossover_freq()` — key-urgency blended crossover calculation
+- `_resolve_fade_bars()` — key tier → energy → spectral → snap pipeline
+- `_resolve_curve_type()` — priority chain for curve selection
 
 ### Integration Point
 
-`SmartCrossFade._build_filters()` in `fades.py` calls `CrossfadeParameterCalculator.compute()` to get `CrossfadeParams`, then uses those values for filter construction instead of the inline heuristics.
+`SmartCrossFade._build_filters()` in `fades.py` calls `resolve_crossfade_params()` to get `CrossfadeParams`, then uses those values for filter construction instead of the inline heuristics.
 
 ### Data Flow
 
 ```
-AudioAnalysisData (fade_out) ─┐
-                               ├─> CrossfadeParameterCalculator.compute()
-AudioAnalysisData (fade_in) ──┘         │
-TimeStretchDecision ──────────────────→ │
-                                        ↓
-                                  CrossfadeParams
-                                        │
-                                        ↓
-                              _build_filters() uses:
-                                - crossover_freq → FrequencySweepFilter.target_freq
-                                - fade_bars → crossfade duration
-                                - curve_type → CrossfadeFilter + FrequencySweepFilter curves
+AudioAnalysisData (fade_out)
+  │  .musical_key: dict ──→ _extract_key() ──→ MusicalKey("D#", "major", 0.8)
+  │  .energy_curve: ndarray                              │
+  │  .spectral_centroid_curve: ndarray                   │
+  │                                                      ↓
+  ├──→ resolve_crossfade_params() ←── MusicalKey.compatibility_score()
+  │         │
+AudioAnalysisData (fade_in)                              │
+  │  .musical_key: dict ──→ _extract_key() ──→ MusicalKey   │
+  │                                                      │
+TimeStretchDecision ────────────────────────────────────→│
+CrossfadeConfig (defaults or custom) ──────────────────→ │
+                                                         ↓
+                                                   CrossfadeParams
+                                                         │
+                                                         ↓
+                                               _build_filters() uses:
+                                                 - crossover_freq → FrequencySweepFilter
+                                                 - fade_bars → crossfade duration
+                                                 - curve_type → CrossfadeFilter curves
 ```
+
+### Coupling Boundaries
+
+- `musical_key.py` has **zero imports** from the rest of the codebase. Pure logic + lookup table.
+- `crossfade_params.py` imports `MusicalKey` from `musical_key.py`, and reads raw dicts from `AudioAnalysisData`. It does **not** add methods or helpers to `AudioAnalysisData`.
+- `AudioAnalysisData` in `models/audio_analysis.py` is **unchanged**. It stores `musical_key: dict[str, Any] | None` as before. The smart fades module owns the translation to its domain type.
+- `fades.py` imports only `resolve_crossfade_params` and `CrossfadeParams` from the new module. The existing `alignment` and `time_stretch` imports stay.
 
 ---
 
@@ -363,23 +458,28 @@ This extends the existing verbose logging pattern in the smart fades code and ma
 
 | File | Change |
 |---|---|
-| **New: `controllers/streams/smart_fades/crossfade_params.py`** | `CrossfadeConfig`, `CrossfadeParams`, `CrossfadeParameterCalculator`, `calculate_key_compatibility()`, `snap_to_musical_bars()` |
-| `controllers/streams/smart_fades/fades.py` | `_build_filters()` calls calculator instead of inline heuristics (replaces lines 273-289) |
-| `controllers/streams/smart_fades/__init__.py` | Export new module if needed |
+| **New: `controllers/streams/smart_fades/musical_key.py`** | `MusicalKey` dataclass with `camelot_code` property, `compatibility_score()` method, `_CAMELOT_WHEEL` lookup table |
+| **New: `controllers/streams/smart_fades/crossfade_params.py`** | `CrossfadeConfig`, `CrossfadeParams`, `resolve_crossfade_params()`, `snap_to_musical_bars()`, private helpers for energy slopes, spectral overlap, crossover, curve selection |
+| `controllers/streams/smart_fades/fades.py` | `_build_filters()` calls `resolve_crossfade_params()` instead of inline heuristics (replaces lines 273-289) |
 
 ## Files NOT Modified
 
+- `models/audio_analysis.py` — `AudioAnalysisData` unchanged, `musical_key` stays as `dict[str, Any] | None`
+- `models/smart_fades.py` — old `MusicalKey` stays (deprecated), no changes
 - `alignment.py` — energy-contour alignment remains unchanged
 - `time_stretch.py` — gradual stretch logic remains unchanged
 - `filters.py` — filter implementations unchanged, just receive different parameter values
+- `mixer.py` — orchestration unchanged
 - `providers/smart_fades/` — analysis provider unchanged
 
 ## Testing
 
-- Unit tests for `CrossfadeParameterCalculator` with known inputs → expected outputs
-- Unit tests for `calculate_key_compatibility()` covering all Camelot relationships
-- Unit tests for `snap_to_musical_bars()` boundary cases
-- Unit tests for graceful degradation (missing signals)
+- Unit tests for `MusicalKey.compatibility_score()` covering all Camelot relationships (same key, adjacent, relative, distant)
+- Unit tests for `MusicalKey.camelot_code` property for all 24 keys
+- Unit tests for `resolve_crossfade_params()` with known inputs → expected outputs (Path A and Path B scenarios)
+- Unit tests for `snap_to_musical_bars()` boundary cases (1.5, 3.0, 6.0, 12.0 thresholds)
+- Unit tests for graceful degradation (missing key, missing spectral, missing energy, missing all)
+- Unit tests for `_extract_key()` from raw dict and None handling
 - Integration: verify `_build_filters()` produces valid FFmpeg filter chains with new parameters
 
 ## CPU Impact
