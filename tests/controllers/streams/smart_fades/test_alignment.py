@@ -7,7 +7,7 @@ from music_assistant.controllers.streams.smart_fades.alignment import (
     _calculate_energy_crossfade_duration,
     _clamp_duration_by_bpm,
     _find_fadein_entry,
-    _find_fadeout_start,
+    _find_knee,
     _find_spectral_fadein_entry,
     _find_spectral_fadeout_start,
     _snap_to_phrase_boundary,
@@ -154,12 +154,13 @@ def test_find_fadeout_start_clear_decline() -> None:
     # Downbeats every 2s (120 BPM, 4/4)
     downbeats = np.arange(0, 45, 2.0)
 
-    result = _find_fadeout_start(energy, downbeats, bpm=120.0)
+    result = _find_knee(energy, downbeats, bpm=120.0)
 
     # Knee is around sec 22-24. With 4 bars (8s at 120 BPM) early offset,
     # the fade start should be around sec 14-18.
     assert result is not None
-    assert 10 <= result <= 22, f"Expected fade start around 10-22s, got {result}"
+    start_pos, _knee_idx = result
+    assert 10 <= start_pos <= 22, f"Expected fade start around 10-22s, got {start_pos}"
 
 
 def test_find_fadeout_start_flat_energy() -> None:
@@ -167,9 +168,43 @@ def test_find_fadeout_start_flat_energy() -> None:
     energy = np.ones(45, dtype=np.float32) * 0.8
     downbeats = np.arange(0, 45, 2.0)
 
-    result = _find_fadeout_start(energy, downbeats)
+    result = _find_knee(energy, downbeats)
 
     # No clear decline — should return None (fallback to current behavior)
+    assert result is None
+
+
+def test_find_knee_clear_decline() -> None:
+    """Clear energy decline should return knee position."""
+    energy = np.ones(45, dtype=np.float32) * 0.9
+    energy[35:] = np.linspace(0.9, 0.1, 10).astype(np.float32)
+    downbeats = np.arange(0, 45, 2.0)
+
+    result = _find_knee(energy, downbeats, bpm=120.0)
+
+    assert result is not None
+    start_pos, knee_idx = result
+    assert 30 <= knee_idx <= 40
+    assert start_pos <= knee_idx
+
+
+def test_find_knee_flat_energy_returns_none() -> None:
+    """Flat energy should return None (no knee)."""
+    energy = np.ones(45, dtype=np.float32) * 0.5
+    downbeats = np.arange(0, 45, 2.0)
+
+    result = _find_knee(energy, downbeats, bpm=120.0)
+
+    assert result is None
+
+
+def test_find_knee_near_silence_returns_none() -> None:
+    """Near-silent track should return None."""
+    energy = np.ones(45, dtype=np.float32) * 0.03
+    downbeats = np.arange(0, 45, 2.0)
+
+    result = _find_knee(energy, downbeats, bpm=120.0)
+
     assert result is None
 
 

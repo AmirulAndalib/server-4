@@ -186,7 +186,8 @@ def _try_energy_alignment(
     fade_out_bpm = fade_out_analysis.bpm or 120.0
     fade_in_bpm = fade_in_analysis.bpm or 120.0
 
-    fadeout_start = _find_fadeout_start(energy_out, fadeout_downbeats_rel, bpm=fade_out_bpm)
+    knee_result = _find_knee(energy_out, fadeout_downbeats_rel, bpm=fade_out_bpm)
+    fadeout_start = knee_result[0] if knee_result is not None else None
     fadein_entry = _find_fadein_entry(energy_in, fadein_downbeats_rel)
 
     if fadeout_start is None or fadein_entry is None:
@@ -401,11 +402,11 @@ def _bar_count_alignment(
     )
 
 
-def _find_fadeout_start(
+def _find_knee(
     energy_tail: npt.NDArray[np.float32],
     downbeats: npt.NDArray[np.float64],
     bpm: float = 120.0,
-) -> float | None:
+) -> tuple[float, float] | None:
     """Find where the outgoing track should begin fading out.
 
     Finds the energy knee (where energy drops below 85% of peak), then backs
@@ -415,7 +416,8 @@ def _find_fadeout_start(
     :param energy_tail: Per-second energy for the last ~45s of the track (buffer-relative).
     :param downbeats: Downbeat timestamps in buffer-relative seconds.
     :param bpm: BPM of the outgoing track (used for bar-length calculations).
-    :return: Fade-out start time in buffer-relative seconds, or None if no clear decline.
+    :return: Tuple of (phrase-snapped start position, raw knee index) in buffer-relative seconds,
+        or None if no clear decline.
     """
     if len(energy_tail) < 4:
         logger.debug("fadeout_start: too short (%d values)", len(energy_tail))
@@ -493,7 +495,9 @@ def _find_fadeout_start(
         early_start_idx,
         snapped if snapped is not None else -1,
     )
-    return snapped
+    if snapped is None:
+        return None
+    return (snapped, float(knee_idx))
 
 
 def _find_fadein_entry(
