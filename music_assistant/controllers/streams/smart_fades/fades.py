@@ -228,13 +228,12 @@ class SmartCrossFade(SmartFade):
 
         self.logger.info(
             "Smart crossfade: %s BPM, strategy=%s, fadeout_start=%.1fs, "
-            "fadein_entry=%.1fs, duration=%.1fs, curve=%s",
+            "fadein_entry=%.1fs, duration=%.1fs",
             f"{self.fade_out_analysis.bpm:.0f}->{self.fade_in_analysis.bpm:.0f}",
             alignment.strategy,
             alignment.fadeout_start_pos if alignment.fadeout_start_pos is not None else -1,
             alignment.fadein_start_pos or -1,
             alignment.crossfade_duration or -1,
-            alignment.curve_type or "default",
         )
 
     def _build_filters(self, alignment: AlignmentResult, stretch: TimeStretchDecision) -> None:
@@ -251,14 +250,12 @@ class SmartCrossFade(SmartFade):
         )
 
         energy_aligned = alignment.strategy in ("energy", "spectral")
-        crossover_freq = params.crossover_freq
-        curve_type = params.curve_type
 
         # Cap crossfade duration: resolver limits based on key/spectral,
         # alignment limits based on available audio and energy positioning
         crossfade_duration = min(alignment.crossfade_duration, params.fade_seconds)
-        fadeout_curve = curve_type
-        fadein_curve = curve_type
+        # EQ sweep curve from resolver (controls transition character)
+        eq_curve = params.curve_type
 
         # Time stretch filter
         if stretch.apply:
@@ -304,12 +301,12 @@ class SmartCrossFade(SmartFade):
             FrequencySweepFilter(
                 logger=self.logger,
                 sweep_type="lowpass",
-                target_freq=crossover_freq,
+                target_freq=params.crossover_freq,
                 duration=fadeout_eq_duration,
                 start_time=fadeout_eq_start,
                 sweep_direction="fade_in",
                 poles=1,
-                curve_type=fadeout_curve,
+                curve_type=eq_curve,
                 stream_type="fadeout",
             )
         )
@@ -320,12 +317,12 @@ class SmartCrossFade(SmartFade):
             FrequencySweepFilter(
                 logger=self.logger,
                 sweep_type="highpass",
-                target_freq=crossover_freq,
+                target_freq=params.crossover_freq,
                 duration=fadein_eq_duration,
                 start_time=0,
                 sweep_direction="fade_out",
                 poles=1,
-                curve_type=fadein_curve,
+                curve_type=eq_curve,
                 stream_type="fadein",
             )
         )

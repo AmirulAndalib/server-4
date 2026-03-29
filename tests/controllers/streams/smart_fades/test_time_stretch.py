@@ -35,7 +35,6 @@ def _make_alignment(
         fadeout_start_pos=fadeout_start_pos,
         fadein_start_pos=fadein_start_pos,
         crossfade_duration=crossfade_duration,
-        curve_type="qsin",
         fadeout_downbeats_rel=np.arange(0, 45, 2.0),
     )
 

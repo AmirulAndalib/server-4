@@ -126,7 +126,6 @@ class AlignmentResult:
     fadeout_start_pos: float | None
     fadein_start_pos: float | None
     crossfade_duration: float
-    curve_type: str | None
     fadeout_downbeats_rel: npt.NDArray[np.float64]
 
 

@@ -10,7 +10,6 @@ from music_assistant.controllers.streams.smart_fades.alignment import (
     _find_fadeout_start,
     _find_spectral_fadein_entry,
     _find_spectral_fadeout_start,
-    _select_crossfade_curve_type,
     _snap_to_phrase_boundary,
     resolve_alignment,
 )
@@ -222,26 +221,6 @@ def test_calculate_energy_crossfade_duration() -> None:
     min_musical = 8 * bar_duration  # 16s
     assert duration >= min_musical, f"Expected duration >= {min_musical}s, got {duration}"
     assert duration <= 40, f"Expected duration <= 40s, got {duration}"
-
-
-def test_select_crossfade_curve_type_similar() -> None:
-    """Similar energy slopes should select equal-power."""
-    out = np.linspace(0.8, 0.2, 10, dtype=np.float32)
-    inc = np.linspace(0.2, 0.8, 10, dtype=np.float32)
-
-    curve = _select_crossfade_curve_type(out, inc)
-
-    assert curve == "qsin"
-
-
-def test_select_crossfade_curve_type_divergent() -> None:
-    """Divergent slopes should select equal-gain."""
-    out = np.linspace(0.8, 0.2, 10, dtype=np.float32)
-    inc = np.ones(10, dtype=np.float32) * 0.5
-
-    curve = _select_crossfade_curve_type(out, inc)
-
-    assert curve == "tri"
 
 
 # ---------------------------------------------------------------------------

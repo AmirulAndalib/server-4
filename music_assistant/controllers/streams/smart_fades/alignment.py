@@ -198,13 +198,6 @@ def _try_energy_alignment(
         bpm=fade_in_bpm,
     )
 
-    # Select curve type based on energy slopes in overlap region
-    curve_type: str | None = None
-    overlap_out = energy_out[int(fadeout_start) : int(fadeout_start) + int(crossfade_duration)]
-    overlap_in = energy_in[int(fadein_entry) : int(fadein_entry) + int(crossfade_duration)]
-    if len(overlap_out) > 1 and len(overlap_in) > 1:
-        curve_type = _select_crossfade_curve_type(overlap_out, overlap_in)
-
     bpm_diff_percent = get_bpm_diff_percentage(fade_out_bpm, fade_in_bpm)
     crossfade_duration = _clamp_duration_by_bpm(
         crossfade_duration, fade_in_bpm, bpm_diff_percent, logger
@@ -215,7 +208,6 @@ def _try_energy_alignment(
         fadeout_start_pos=fadeout_start,
         fadein_start_pos=fadein_entry,
         crossfade_duration=crossfade_duration,
-        curve_type=curve_type,
         fadeout_downbeats_rel=fadeout_downbeats_rel,
     )
 
@@ -317,7 +309,6 @@ def _try_spectral_alignment(
         fadeout_start_pos=fadeout_start,
         fadein_start_pos=fadein_entry,
         crossfade_duration=crossfade_duration,
-        curve_type="qsin",
         fadeout_downbeats_rel=fadeout_downbeats_rel,
     )
 
@@ -398,7 +389,6 @@ def _bar_count_alignment(
         fadeout_start_pos=None,
         fadein_start_pos=fadein_start_pos,
         crossfade_duration=crossfade_duration,
-        curve_type=None,
         fadeout_downbeats_rel=fadeout_downbeats_rel,
     )
 
@@ -661,31 +651,6 @@ def _calculate_energy_crossfade_duration(
         final_duration,
     )
     return final_duration
-
-
-def _select_crossfade_curve_type(
-    outgoing_energy: npt.NDArray[np.float32],
-    incoming_energy: npt.NDArray[np.float32],
-) -> str:
-    """Select crossfade curve based on energy slope comparison.
-
-    :param outgoing_energy: Per-second energy for outgoing track's crossfade region.
-    :param incoming_energy: Per-second energy for incoming track's crossfade region.
-    :return: FFmpeg acrossfade curve name ('qsin' or 'tri').
-    """
-    if len(outgoing_energy) < 2 or len(incoming_energy) < 2:
-        return "tri"
-
-    out_slope = float(np.polyfit(np.arange(len(outgoing_energy)), outgoing_energy, 1)[0])
-    inc_slope = float(np.polyfit(np.arange(len(incoming_energy)), incoming_energy, 1)[0])
-
-    # Complementary slopes (out declining + in rising at similar rate) -> equal-power
-    # Divergent slopes (magnitudes differ significantly) -> equal-gain
-    slope_sum = abs(out_slope + inc_slope)
-
-    if slope_sum < 0.05:
-        return "qsin"  # Equal-power — slopes are complementary
-    return "tri"  # Equal-gain — slopes are divergent
 
 
 def _clamp_duration_by_bpm(
