@@ -7,12 +7,14 @@ from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING
 
 import aiofiles
-import numpy as np
 import shortuuid
 
 from music_assistant.constants import VERBOSE_LOG_LEVEL
 from music_assistant.controllers.streams.smart_fades.alignment import (
     resolve_alignment,
+)
+from music_assistant.controllers.streams.smart_fades.crossfade_params import (
+    resolve_crossfade_params,
 )
 from music_assistant.controllers.streams.smart_fades.filters import (
     CrossfadeFilter,
@@ -241,9 +243,17 @@ class SmartCrossFade(SmartFade):
         :param alignment: Resolved and compensated alignment result.
         :param stretch: Time-stretch decision.
         """
+        params = resolve_crossfade_params(
+            fade_out_analysis=self.fade_out_analysis,
+            fade_in_analysis=self.fade_in_analysis,
+            stretch=stretch,
+            logger=self.logger,
+        )
+
         energy_aligned = alignment.strategy in ("energy", "spectral")
-        fade_out_bpm = self.fade_out_analysis.bpm or 120.0
-        fade_in_bpm = self.fade_in_analysis.bpm or 120.0
+        crossover_freq = params.crossover_freq
+        fadeout_curve = params.curve_type
+        fadein_curve = params.curve_type
 
         # Time stretch filter
         if stretch.apply:
@@ -271,23 +281,6 @@ class SmartCrossFade(SmartFade):
                 alignment.crossfade_duration,
                 SMART_CROSSFADE_DURATION,
             )
-
-        # EQ crossover frequency: 90 BPM -> 1500Hz, 140 BPM -> 2500Hz
-        avg_bpm = (fade_out_bpm + fade_in_bpm) / 2
-        crossover_freq = int(np.clip(1500 + (avg_bpm - 90) * 20, 1500, 2500))
-        if abs(stretch.bpm_ratio - 1.0) > 0.3:
-            crossover_freq = int(crossover_freq * 0.85)
-
-        # Determine crossfade_bars for curve selection
-        bar_duration = 4 * (60.0 / fade_in_bpm)
-        crossfade_bars = int(alignment.crossfade_duration / bar_duration) if bar_duration > 0 else 0
-
-        if crossfade_bars < 8:
-            fadeout_curve = "exponential"
-            fadein_curve = "exponential"
-        else:
-            fadeout_curve = "logarithmic"
-            fadein_curve = "linear"
 
         # Fadeout end position (energy-aligned path)
         fadeout_end_pos: float | None = None
