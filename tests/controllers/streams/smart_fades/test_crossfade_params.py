@@ -157,7 +157,7 @@ def test_path_a_fade_between_1_5_and_2_5_seconds() -> None:
         fade_in_analysis=fade_in,
         stretch=stretch,
     )
-    assert 1.5 <= result.fade_seconds <= 2.5
+    assert 1.5 <= result.max_fade_seconds <= 2.5
 
 
 def test_path_a_crossover_between_2200_and_3000() -> None:
@@ -247,7 +247,7 @@ def test_path_b_compatible_key_long_fade() -> None:
     result = resolve_crossfade_params(
         fade_out_analysis=fade_out, fade_in_analysis=fade_in, stretch=stretch
     )
-    assert result.fade_bars >= 8
+    assert result.max_fade_bars >= 8
 
 
 def test_path_b_incompatible_key_short_fade() -> None:
@@ -262,7 +262,7 @@ def test_path_b_incompatible_key_short_fade() -> None:
     result = resolve_crossfade_params(
         fade_out_analysis=fade_out, fade_in_analysis=fade_in, stretch=stretch
     )
-    assert result.fade_bars <= 4
+    assert result.max_fade_bars <= 4
 
 
 def test_path_b_fade_bars_is_power_of_2() -> None:
@@ -277,7 +277,7 @@ def test_path_b_fade_bars_is_power_of_2() -> None:
     result = resolve_crossfade_params(
         fade_out_analysis=fade_out, fade_in_analysis=fade_in, stretch=stretch
     )
-    assert result.fade_bars in (1, 2, 4, 8, 16)
+    assert result.max_fade_bars in (1, 2, 4, 8, 16)
 
 
 def test_path_b_bar_alignment_enabled() -> None:
@@ -309,8 +309,8 @@ def test_path_b_incompatible_key_exponential() -> None:
     assert result.curve_type == "exponential"
 
 
-def test_path_b_default_curve_is_qsin() -> None:
-    """Path B: default curve is qsin (equal-power)."""
+def test_path_b_compatible_key_long_fade_uses_linear() -> None:
+    """Path B: compatible key produces 16-bar max fade, triggering linear curve."""
     fade_out = _make_analysis(
         musical_key={"root": "C", "mode": "major", "confidence": 0.9},
     )
@@ -321,7 +321,7 @@ def test_path_b_default_curve_is_qsin() -> None:
     result = resolve_crossfade_params(
         fade_out_analysis=fade_out, fade_in_analysis=fade_in, stretch=stretch
     )
-    assert result.curve_type == "qsin"
+    assert result.curve_type == "linear"
 
 
 # ── Graceful degradation ─────────────────────────────────────────────
@@ -335,7 +335,7 @@ def test_no_key_uses_neutral_compat() -> None:
     result = resolve_crossfade_params(
         fade_out_analysis=fade_out, fade_in_analysis=fade_in, stretch=stretch
     )
-    assert result.fade_bars in (4, 8)
+    assert result.max_fade_bars in (4, 8)
     assert result.curve_type == "qsin"
 
 
@@ -367,5 +367,5 @@ def test_low_key_confidence_still_uses_score() -> None:
         fade_out_analysis=fade_out, fade_in_analysis=fade_in, stretch=stretch
     )
     # C major (8B) to F# major (2B) = distance 6 = incompatible (0.1)
-    assert result.fade_bars <= 4
+    assert result.max_fade_bars <= 4
     assert result.curve_type == "exponential"

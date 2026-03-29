@@ -241,8 +241,8 @@ def _resolve_path_a(
 
     return CrossfadeParams(
         crossover_freq=crossover,
-        fade_bars=0,
-        fade_seconds=fade_seconds,
+        max_fade_bars=0,
+        max_fade_seconds=fade_seconds,
         curve_type="exponential",
         use_bar_alignment=False,
     )
@@ -276,13 +276,13 @@ def _resolve_path_b(
     slope_in = _compute_energy_slope(fade_in_analysis.energy_curve, tail=False)
 
     crossover_freq = _resolve_crossover_freq(key_compat, centroid_out, centroid_in, config)
-    fade_bars = _resolve_fade_bars(key_compat, slope_out, slope_in, spectral_olap, config)
+    max_fade_bars = _resolve_fade_bars(key_compat, config)
     curve_type = _resolve_curve_type(
-        key_compat, spectral_olap, slope_out, slope_in, fade_bars, config
+        key_compat, spectral_olap, slope_out, slope_in, max_fade_bars, config
     )
 
     bar_duration = 4.0 * 60.0 / fade_in_bpm
-    fade_seconds = round(fade_bars * bar_duration, 2)
+    max_fade_seconds = round(max_fade_bars * bar_duration, 2)
 
     if logger:
         logger.debug(
@@ -295,16 +295,16 @@ def _resolve_path_b(
             slope_out,
             slope_in,
             crossover_freq,
-            fade_bars,
-            fade_seconds,
+            max_fade_bars,
+            max_fade_seconds,
             curve_type,
             spectral_olap,
         )
 
     return CrossfadeParams(
         crossover_freq=crossover_freq,
-        fade_bars=fade_bars,
-        fade_seconds=fade_seconds,
+        max_fade_bars=max_fade_bars,
+        max_fade_seconds=max_fade_seconds,
         curve_type=curve_type,
         use_bar_alignment=True,
     )
@@ -341,38 +341,20 @@ def _resolve_crossover_freq(
 
 def _resolve_fade_bars(
     key_compat: float,
-    slope_out: float,
-    slope_in: float,
-    spectral_olap: float,
     config: CrossfadeConfig,
 ) -> int:
-    """Determine fade length in bars: key tier -> energy -> spectral -> snap.
+    """Max fade length from key compatibility tiers.
 
     :param key_compat: Key compatibility 0-1.
-    :param slope_out: Outgoing energy slope.
-    :param slope_in: Incoming energy slope.
-    :param spectral_olap: Spectral overlap 0-1.
     :param config: Crossfade configuration.
     """
     if key_compat >= config.key_threshold_compatible:
-        tier_min, tier_max = config.key_tier_compatible
-    elif key_compat >= config.key_threshold_moderate:
-        tier_min, tier_max = config.key_tier_moderate
-    elif key_compat >= config.key_threshold_clashing:
-        tier_min, tier_max = config.key_tier_incompatible
-    else:
-        tier_min, tier_max = config.key_tier_clashing
-
-    energy_flow = max(-2.0, min(2.0, slope_in - slope_out))
-    energy_score = (energy_flow + 2.0) / 4.0
-    fade_bars_raw = tier_min + (tier_max - tier_min) * energy_score
-
-    spectral_mult = config.spectral_fade_mult_min + spectral_olap * (
-        config.spectral_fade_mult_max - config.spectral_fade_mult_min
-    )
-    fade_bars_raw *= spectral_mult
-
-    return snap_to_musical_bars(fade_bars_raw)
+        return config.key_tier_compatible[1]
+    if key_compat >= config.key_threshold_moderate:
+        return config.key_tier_moderate[1]
+    if key_compat >= config.key_threshold_clashing:
+        return config.key_tier_incompatible[1]
+    return config.key_tier_clashing[1]
 
 
 def _resolve_curve_type(

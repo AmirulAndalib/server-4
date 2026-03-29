@@ -200,7 +200,7 @@ class CrossfadeParams:
     """Resolved crossfade parameters for filter construction."""
 
     crossover_freq: int
-    fade_bars: int
-    fade_seconds: float
+    max_fade_bars: int
+    max_fade_seconds: float
     curve_type: str
     use_bar_alignment: bool
