@@ -51,17 +51,28 @@ The energy-contour alignment in `alignment.py` (fade positioning and duration) r
 
 ### Module Structure
 
-Two new files in `music_assistant/controllers/streams/smart_fades/`, following the existing pattern of one concept per file with a resolver function returning a dataclass result (same as `alignment.py` → `resolve_alignment()` → `AlignmentResult`, `time_stretch.py` → `resolve_time_stretch()` → `TimeStretchDecision`).
+The smart fades controller module follows a consistent pattern: resolver functions that take analysis data and return dataclass results. All dataclasses are consolidated into a single `models.py` within the module, while logic stays in its own file.
 
-#### New File: `musical_key.py`
+#### New File: `models.py`
 
-Location: `music_assistant/controllers/streams/smart_fades/musical_key.py`
+Location: `music_assistant/controllers/streams/smart_fades/models.py`
 
-A self-contained module for musical key representation and harmonic compatibility scoring. **Deliberately decoupled from `AudioAnalysisData`** — this is the smart fades module's own domain concept, not a model-layer type.
+Consolidates **all** dataclasses used across the smart fades controller module into one place. This includes existing dataclasses that are currently defined inline in their logic files, plus the new ones from this spec.
 
-Contains:
-- `MusicalKey` — dataclass with `root`, `mode`, `confidence`, plus Camelot wheel logic
-- `_CAMELOT_WHEEL` — module-level lookup table (~24 entries)
+**Moved from existing files:**
+- `AlignmentResult` (currently in `alignment.py`)
+- `TimeStretchDecision` (currently in `time_stretch.py`)
+
+**New dataclasses:**
+- `MusicalKey` — key representation with Camelot wheel logic (see below)
+- `CrossfadeConfig` — all tunable crossfade parameters
+- `CrossfadeParams` — resolved crossfade parameters for filter construction
+
+The existing files (`alignment.py`, `time_stretch.py`) import their dataclasses from `models.py` instead of defining them inline. This eliminates circular import risk and makes the type landscape visible in one place.
+
+#### `MusicalKey` in `models.py`
+
+**Deliberately decoupled from `AudioAnalysisData`** — this is the smart fades module's own domain concept, not a model-layer type. The smart fades module constructs `MusicalKey` from the raw `musical_key: dict` in `AudioAnalysisData`.
 
 ```python
 @dataclass
@@ -90,7 +101,7 @@ class MusicalKey:
         ...
 ```
 
-**Camelot wheel lookup table:** Maps `(root, mode)` to Camelot code. 24 entries covering all keys.
+**Camelot wheel lookup table:** Module-level constant in `models.py`. Maps `(root, mode)` to Camelot code. 24 entries covering all keys.
 
 ```python
 _CAMELOT_WHEEL: dict[tuple[str, str], str] = {
@@ -126,11 +137,9 @@ Returns `0.1` if either key has no valid Camelot code (unrecognized root/mode).
 
 Location: `music_assistant/controllers/streams/smart_fades/crossfade_params.py`
 
-Contains the unified decision logic. Follows the resolver pattern: `resolve_crossfade_params()` returns a `CrossfadeParams` dataclass.
+Contains the unified decision logic. Follows the resolver pattern: `resolve_crossfade_params()` returns a `CrossfadeParams` dataclass (defined in `models.py`).
 
 Contains:
-- `CrossfadeConfig` — all tunable parameters as a dataclass with defaults
-- `CrossfadeParams` — output dataclass
 - `resolve_crossfade_params()` — main resolver function
 - `snap_to_musical_bars()` — power-of-2 bar snapping (public, useful for tests)
 - `_extract_key()` — constructs `MusicalKey` from raw `AudioAnalysisData.musical_key` dict
@@ -171,10 +180,11 @@ CrossfadeConfig (defaults or custom) ──────────────�
 
 ### Coupling Boundaries
 
-- `musical_key.py` has **zero imports** from the rest of the codebase. Pure logic + lookup table.
-- `crossfade_params.py` imports `MusicalKey` from `musical_key.py`, and reads raw dicts from `AudioAnalysisData`. It does **not** add methods or helpers to `AudioAnalysisData`.
+- `models.py` has minimal imports — only `numpy` for type hints on `AlignmentResult.fadeout_downbeats_rel`. No imports from other smart fades modules.
+- `crossfade_params.py` imports types from `models.py` and reads raw dicts from `AudioAnalysisData`. It does **not** add methods or helpers to `AudioAnalysisData`.
 - `AudioAnalysisData` in `models/audio_analysis.py` is **unchanged**. It stores `musical_key: dict[str, Any] | None` as before. The smart fades module owns the translation to its domain type.
-- `fades.py` imports only `resolve_crossfade_params` and `CrossfadeParams` from the new module. The existing `alignment` and `time_stretch` imports stay.
+- `alignment.py` and `time_stretch.py` import their dataclasses from `models.py` instead of defining them inline.
+- `fades.py` imports `resolve_crossfade_params` from `crossfade_params.py` and types from `models.py`.
 
 ---
 
@@ -458,18 +468,19 @@ This extends the existing verbose logging pattern in the smart fades code and ma
 
 | File | Change |
 |---|---|
-| **New: `controllers/streams/smart_fades/musical_key.py`** | `MusicalKey` dataclass with `camelot_code` property, `compatibility_score()` method, `_CAMELOT_WHEEL` lookup table |
-| **New: `controllers/streams/smart_fades/crossfade_params.py`** | `CrossfadeConfig`, `CrossfadeParams`, `resolve_crossfade_params()`, `snap_to_musical_bars()`, private helpers for energy slopes, spectral overlap, crossover, curve selection |
-| `controllers/streams/smart_fades/fades.py` | `_build_filters()` calls `resolve_crossfade_params()` instead of inline heuristics (replaces lines 273-289) |
+| **New: `controllers/streams/smart_fades/models.py`** | All dataclasses: `MusicalKey` (with Camelot logic), `CrossfadeConfig`, `CrossfadeParams`, plus moved `AlignmentResult`, `TimeStretchDecision`. Also `_CAMELOT_WHEEL` lookup table. |
+| **New: `controllers/streams/smart_fades/crossfade_params.py`** | `resolve_crossfade_params()`, `snap_to_musical_bars()`, private helpers for key extraction, energy slopes, spectral overlap, crossover, curve selection |
+| `controllers/streams/smart_fades/alignment.py` | Remove `AlignmentResult` dataclass definition, import from `models.py` |
+| `controllers/streams/smart_fades/time_stretch.py` | Remove `TimeStretchDecision` dataclass definition, import from `models.py` |
+| `controllers/streams/smart_fades/fades.py` | `_build_filters()` calls `resolve_crossfade_params()` instead of inline heuristics (replaces lines 273-289), imports from `models.py` |
 
 ## Files NOT Modified
 
 - `models/audio_analysis.py` — `AudioAnalysisData` unchanged, `musical_key` stays as `dict[str, Any] | None`
 - `models/smart_fades.py` — old `MusicalKey` stays (deprecated), no changes
-- `alignment.py` — energy-contour alignment remains unchanged
-- `time_stretch.py` — gradual stretch logic remains unchanged
 - `filters.py` — filter implementations unchanged, just receive different parameter values
 - `mixer.py` — orchestration unchanged
+- `helpers.py` — shared utilities unchanged
 - `providers/smart_fades/` — analysis provider unchanged
 
 ## Testing
