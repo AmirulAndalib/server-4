@@ -336,12 +336,18 @@ class SmartCrossFade(SmartFade):
                 FadeoutTrimFilter(logger=self.logger, fadeout_end_pos=fadeout_end_pos)
             )
 
-        # Final crossfade
+        # Final crossfade — map curve names to FFmpeg acrossfade values
+        ffmpeg_curve_map = {
+            "linear": "tri",
+            "exponential": "exp",
+            "logarithmic": "log",
+            "qsin": "qsin",
+        }
         self.filters.append(
             CrossfadeFilter(
                 logger=self.logger,
                 crossfade_duration=crossfade_duration,
-                curve_type=curve_type,
+                curve_type=ffmpeg_curve_map.get(curve_type, curve_type),
             )
         )
 
