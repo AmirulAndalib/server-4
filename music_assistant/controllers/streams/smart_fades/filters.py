@@ -298,8 +298,9 @@ class CrossfadeFilter(Filter):
     def apply(self, input_fadein_label: str, input_fadeout_label: str) -> list[str]:
         """Apply the acrossfade filter."""
         expr = f"{input_fadeout_label}{input_fadein_label}acrossfade=d={self.crossfade_duration}"
-        if self.curve_type:
-            expr += f":c1={self.curve_type}:c2={self.curve_type}"
+        # TODO: Decide on curve type
+        # if self.curve_type:
+        #     expr += f":c1={self.curve_type}:c2={self.curve_type}"
         return [expr]
 
     def __repr__(self) -> str:
