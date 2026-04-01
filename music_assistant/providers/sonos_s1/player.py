@@ -29,6 +29,8 @@ from .constants import (
     LINEIN_SOURCE_IDS,
     LINEIN_SOURCES,
     NEVER_TIME,
+    PING_FAILURES_BEFORE_OFFLINE,
+    PING_TIMEOUT,
     PLAYER_FEATURES,
     PLAYER_SOURCE_MAP,
     POSITION_SECONDS,
@@ -91,6 +93,7 @@ class SonosPlayer(Player):
         self._subscription_lock: asyncio.Lock | None = None
         self._last_activity: float = NEVER_TIME
         self._resub_cooldown_expires_at: float | None = None
+        self._consecutive_ping_failures: int = 0
 
     @property
     def missing_subscriptions(self) -> set[str]:
@@ -358,20 +361,35 @@ class SonosPlayer(Player):
         """Check if the player is still available."""
         try:
             await asyncio.to_thread(self.ping)
+            self._consecutive_ping_failures = 0
             self._speaker_activity("ping")
         except SonosUpdateError:
             if not self._attr_available:
                 return
+            self._consecutive_ping_failures += 1
+            if self._consecutive_ping_failures < PING_FAILURES_BEFORE_OFFLINE:
+                self.logger.debug(
+                    "Ping failed for %s (%s/%s)",
+                    self.display_name,
+                    self._consecutive_ping_failures,
+                    PING_FAILURES_BEFORE_OFFLINE,
+                )
+                return
             self.logger.warning(
-                "No recent activity and cannot reach %s, marking unavailable",
+                "No recent activity and cannot reach %s after %s consecutive "
+                "ping failures, marking unavailable",
                 self.display_name,
+                self._consecutive_ping_failures,
             )
+            self._consecutive_ping_failures = 0
             await self.offline()
 
     @soco_error()
     def ping(self) -> None:
         """Test device availability. Failure will raise SonosUpdateError."""
-        self.soco.renderingControl.GetVolume([("InstanceID", 0), ("Channel", "Master")], timeout=1)
+        self.soco.renderingControl.GetVolume(
+            [("InstanceID", 0), ("Channel", "Master")], timeout=PING_TIMEOUT
+        )
 
     @soco_error()
     def _poll_track_info(self) -> dict[str, Any]:
@@ -657,6 +675,7 @@ class SonosPlayer(Player):
 
         self.logger.log(VERBOSE_LOG_LEVEL, "Activity on %s from %s", self.display_name, source)
         self._last_activity = time.monotonic()
+        self._consecutive_ping_failures = 0
         was_available = self._attr_available
         self._attr_available = True
         if not was_available:
