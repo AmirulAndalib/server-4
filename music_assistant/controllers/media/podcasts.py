@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 from collections.abc import AsyncGenerator
+from enum import StrEnum
 from typing import TYPE_CHECKING, Any
 
 from music_assistant_models.enums import MediaType, ProviderFeature
 from music_assistant_models.errors import MediaNotFoundError, ProviderUnavailableError
 from music_assistant_models.media_items import Podcast, PodcastEpisode, ProviderMapping, UniqueList
 
-from music_assistant.constants import DB_TABLE_PLAYLOG, DB_TABLE_PODCASTS
+from music_assistant.constants import (
+    DB_TABLE_PLAYLOG,
+    DB_TABLE_PODCASTS,
+    PLAYBACK_REPORT_INTERVAL_SECONDS,
+)
 from music_assistant.controllers.media.base import MediaControllerBase
 from music_assistant.controllers.webserver.helpers.auth_middleware import get_current_user
 from music_assistant.helpers.compare import (
@@ -29,6 +34,14 @@ if TYPE_CHECKING:
     from music_assistant import MusicAssistant
 
 
+class PodcastEpisodeFilter(StrEnum):
+    """PodcastEpisodeFilter."""
+
+    IN_PROGRESS = "in_progress"
+    NOT_LISTENED = "not_listened"
+    LISTENED = "listened"
+
+
 class PodcastsController(MediaControllerBase[Podcast]):
     """Controller managing MediaItems of type Podcast."""
 
@@ -44,6 +57,7 @@ class PodcastsController(MediaControllerBase[Podcast]):
         self.mass.register_api_command(f"music/{api_base}/podcast_episodes", self.episodes)
         self.mass.register_api_command(f"music/{api_base}/podcast_episode", self.episode)
         self.mass.register_api_command(f"music/{api_base}/podcast_versions", self.versions)
+        self.mass.register_api_command(f"music/{api_base}/episode_next", self.episode_next)
 
     async def library_items(
         self,
@@ -97,10 +111,49 @@ class PodcastsController(MediaControllerBase[Podcast]):
             )
         return result
 
+    async def episode_next(
+        self, item_id: str, provider_instance_id_or_domain: str
+    ) -> PodcastEpisode | None:
+        """Return the next episode of a podcast.
+
+        Iterates from the most recent episode of a podcast backwards and gives the first
+        non-listened or in-progress episode. I.e:
+            Episode 200 - not listened/ in progress
+            Episode 199 - not listened/ in progress <-- will return this episode
+            Episode 198 - listened
+            Episode 197 - not listened/ in progress
+        """
+        # lowest position is the most recent one
+        lowest_fully_played_position: int | None = None
+        potential_episodes: list[PodcastEpisode] = []
+        async for episode in self.episodes(item_id, provider_instance_id_or_domain):
+            if episode.fully_played:
+                if lowest_fully_played_position is None:
+                    lowest_fully_played_position = episode.position
+                    continue
+                lowest_fully_played_position = min(lowest_fully_played_position, episode.position)
+            else:
+                potential_episodes.append(episode)
+
+        if lowest_fully_played_position is None:
+            episodes = sorted(
+                potential_episodes,
+                key=lambda e: e.position,
+            )
+        else:
+            episodes = sorted(
+                [e for e in potential_episodes if e.position < lowest_fully_played_position],
+                key=lambda e: -e.position,
+            )
+        if len(episodes) > 0:
+            return episodes[0]
+        return None
+
     async def episodes(
         self,
         item_id: str,
         provider_instance_id_or_domain: str,
+        episode_filter: PodcastEpisodeFilter | None = None,
     ) -> AsyncGenerator[PodcastEpisode, None]:
         """Return podcast episodes for the given provider podcast id."""
         # always check if we have a library item for this podcast
@@ -114,6 +167,26 @@ class PodcastsController(MediaControllerBase[Podcast]):
         async for episode in self._get_provider_podcast_episodes(
             item_id, provider_instance_id_or_domain
         ):
+            if episode_filter:
+                if episode_filter == PodcastEpisodeFilter.NOT_LISTENED:
+                    if episode.fully_played or (
+                        episode.resume_position_ms is not None
+                        and episode.resume_position_ms > PLAYBACK_REPORT_INTERVAL_SECONDS
+                    ):
+                        continue
+                if episode_filter == PodcastEpisodeFilter.LISTENED:
+                    if not episode.fully_played:
+                        continue
+                if episode_filter == PodcastEpisodeFilter.IN_PROGRESS:
+                    if (
+                        episode.fully_played
+                        or episode.resume_position_ms is None
+                        or (
+                            episode.resume_position_ms is not None
+                            and episode.resume_position_ms < PLAYBACK_REPORT_INTERVAL_SECONDS
+                        )
+                    ):
+                        continue
             yield episode
 
     async def episode(
