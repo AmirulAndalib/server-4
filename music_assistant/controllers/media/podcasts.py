@@ -112,16 +112,16 @@ class PodcastsController(MediaControllerBase[Podcast]):
         return result
 
     async def episode_next(
-        self, item_id: str, provider_instance_id_or_domain: str
+        self, item_id: str, provider_instance_id_or_domain: str, most_recent: bool = False
     ) -> PodcastEpisode | None:
         """Return the next episode of a podcast.
 
-        Iterates from the most recent episode of a podcast backwards and gives the first
-        non-listened or in-progress episode. I.e:
-            Episode 200 - not listened/ in progress
-            Episode 199 - not listened/ in progress <-- will return this episode
-            Episode 198 - listened
-            Episode 197 - not listened/ in progress
+        Example:
+            Episode 200 - not listened/ in progress <-- this episode for most_recent = True
+            Episode 199 - not listened/ in progress
+            Episode 198 - not listened/ in progress <-- this episode for most_recent = False
+            Episode 197 - listened
+            Episode 196 - not listened/ in progress
         """
         # lowest position is the most recent one
         lowest_fully_played_position: int | None = None
@@ -146,7 +146,7 @@ class PodcastsController(MediaControllerBase[Podcast]):
                 key=lambda e: -e.position,
             )
         if len(episodes) > 0:
-            return episodes[0]
+            return episodes[0] if not most_recent else episodes[-1]
         return None
 
     async def episodes(
