@@ -9,6 +9,8 @@ import pytest
 from music_assistant_models.enums import PlaybackState, PlayerFeature
 from music_assistant_models.player import OutputProtocol
 
+from music_assistant.constants import CONF_DYNAMIC_GROUP_MEMBERS
+from music_assistant.providers.sync_group.constants import CONF_MEMBERS_FILTER
 from music_assistant.providers.sync_group.player import SyncGroupPlayer
 
 
@@ -86,9 +88,9 @@ def _make_sync_group(mass: MagicMock, player_id: str = "syncgroup_test") -> Sync
     provider.mass = mass
 
     def _config_get_value(key: str, default: object = None) -> object:
-        if key == "dynamic_group_members":
+        if key == CONF_DYNAMIC_GROUP_MEMBERS:
             return True
-        if key == "members_filter":
+        if key == CONF_MEMBERS_FILTER:
             return []
         return default
 
@@ -152,6 +154,23 @@ class TestProtocolAwareLeaderSelection:
 
         leader = sgp._select_sync_leader()
         assert leader == player_a
+
+    def test_can_group_with_does_not_expose_non_leader_candidates(self) -> None:
+        """Only advertise candidates the current leader can actually accept."""
+        mass = _make_mock_mass()
+        sgp = _make_sync_group(mass)
+
+        leader = _make_mock_player("leader")
+        helper = _make_mock_player("helper")
+        leader.state.can_group_with = {"leader_peer"}
+        helper.state.can_group_with = {"helper_only_peer"}
+
+        mass.players.get_player = _player_lookup({"leader": leader, "helper": helper})
+
+        sgp.sync_leader = leader
+        sgp._attr_group_members = ["leader", "helper"]
+
+        assert sgp.can_group_with == {"leader", "leader_peer"}
 
 
 class TestMemberSupportsProtocol:
