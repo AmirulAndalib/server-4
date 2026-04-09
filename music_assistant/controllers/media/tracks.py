@@ -598,6 +598,10 @@ class TracksController(MediaControllerBase[Track]):
         await self._set_track_artists(db_id, artists, overwrite=overwrite)
         # update/set track album
         if update.album:
+            if overwrite:
+                # clear existing album associations so stale links are removed
+                # when the album (artist) changes, similar to how track_artists are handled
+                await self.mass.music.database.delete(DB_TABLE_ALBUM_TRACKS, {"track_id": db_id})
             await self._set_track_album(
                 db_id=db_id,
                 album=update.album,
