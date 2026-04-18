@@ -1905,6 +1905,12 @@ class Player(ABC):
             base_features.add(PlayerFeature.VOLUME_MUTE)
         else:
             base_features.discard(PlayerFeature.VOLUME_MUTE)
+        # If the effective source list contains selectable entries beyond the
+        # default MA queue (plugin sources like VBAN, device-native inputs,
+        # alternate queues), expose SELECT_SOURCE so external integrations
+        # (e.g. Home Assistant) mirror the capability available in the MA UI.
+        if any(src.id != self.player_id for src in self.__final_source_list):
+            base_features.add(PlayerFeature.SELECT_SOURCE)
         return base_features
 
     @cached_property
