@@ -340,23 +340,27 @@ class AudioAnalysisController:
                 len(candidates),
             )
             processed = 0
+            unavailable_music_providers: set[str] = set()
             for row in candidates:
                 if not provider.available:
                     # provider was disabled mid-run
                     break
                 item_id = str(row["item_id"])
                 provider_instance = str(row["provider_instance"])
+                if provider_instance in unavailable_music_providers:
+                    continue
                 music_prov = self.mass.get_provider(provider_instance, provider_type=MusicProvider)
                 if music_prov is None or not music_prov.available:
-                    # storage may be offline right now (e.g. NAS asleep) — stop the
-                    # batch rather than churning through failures for the remaining
-                    # tracks
+                    # storage for this provider instance may be offline right now
+                    # (e.g. NAS asleep). Skip the remaining rows for that instance,
+                    # but keep scanning candidates for other available instances.
                     self.logger.debug(
-                        "Background %s analysis: provider %s unavailable, aborting batch",
+                        "Background %s analysis: provider %s unavailable, skipping instance",
                         provider.domain,
                         provider_instance,
                     )
-                    break
+                    unavailable_music_providers.add(provider_instance)
+                    continue
 
                 try:
                     streamdetails = await music_prov.get_stream_details(item_id, MediaType.TRACK)
@@ -435,6 +439,7 @@ class AudioAnalysisController:
             f"  AND aa.media_type = '{track_media_type}' "
             f"WHERE pm.media_type = '{track_media_type}' "
             f"  AND pm.provider_domain IN ({domains_sql}) "
+            f"  AND pm.available = 1 "
             f"  AND aa.id IS NULL"
         )
         rows = await self.mass.music.database.get_rows_from_query(query, limit=limit)

@@ -7,7 +7,7 @@ import unittest.mock
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from music_assistant_models.enums import ContentType, MediaType
+from music_assistant_models.enums import ContentType, MediaType, ProviderType, StreamType
 from music_assistant_models.media_items import AudioFormat
 
 from music_assistant.controllers.streams.audio_analysis import (
@@ -477,3 +477,99 @@ async def test_finalize_cleans_up_sessions_on_error() -> None:
         await AudioAnalysisProvider.finalize(provider, "test_session")
 
     assert "test_session" not in provider._sessions
+
+
+@pytest.mark.asyncio
+async def test_background_scan_skips_unavailable_music_provider_instance(
+    controller: AudioAnalysisController,
+    mock_mass: MagicMock,
+) -> None:
+    """An unavailable music provider must not abort analysis for later available rows."""
+    analysis_provider = MagicMock()
+    analysis_provider.available = True
+    analysis_provider.domain = "loudness_analysis"
+    analysis_provider.analysis_version = 1
+    analysis_result = MagicMock()
+    analysis_provider.analyze_file = AsyncMock(return_value=analysis_result)
+
+    offline_music = MagicMock()
+    offline_music.available = False
+
+    online_music = MagicMock()
+    online_music.available = True
+    online_music.instance_id = "online_fs"
+    streamdetails = MagicMock()
+    streamdetails.stream_type = StreamType.LOCAL_FILE
+    streamdetails.path = "/music/test.flac"
+    online_music.get_stream_details = AsyncMock(return_value=streamdetails)
+
+    def _get_provider(provider_id: str, _provider_type: type | None = None) -> MagicMock | None:
+        return {"offline_fs": offline_music, "online_fs": online_music}.get(provider_id)
+
+    mock_mass.get_provider = MagicMock(side_effect=_get_provider)
+
+    with (
+        unittest.mock.patch.object(
+            controller,
+            "_find_tracks_missing_analysis",
+            AsyncMock(
+                return_value=[
+                    {"item_id": "offline-track", "provider_instance": "offline_fs"},
+                    {"item_id": "good-track", "provider_instance": "online_fs"},
+                ]
+            ),
+        ),
+        unittest.mock.patch.object(
+            controller, "set_audio_analysis", AsyncMock()
+        ) as set_audio_analysis,
+        unittest.mock.patch.object(
+            AudioAnalysisController,
+            "providers",
+            new_callable=unittest.mock.PropertyMock,
+            return_value=[analysis_provider],
+        ),
+        unittest.mock.patch(
+            "music_assistant.controllers.streams.audio_analysis.BACKGROUND_SCAN_SLEEP_BETWEEN_ITEMS",
+            0,
+        ),
+    ):
+        await controller._run_background_scan()
+
+    analysis_provider.analyze_file.assert_awaited_once_with(streamdetails)
+    set_audio_analysis.assert_awaited_once_with(
+        item_id="good-track",
+        provider_instance_id_or_domain="online_fs",
+        aa_provider_domain="loudness_analysis",
+        analysis=analysis_result,
+        analysis_version=1,
+    )
+
+
+@pytest.mark.asyncio
+async def test_find_tracks_missing_analysis_filters_unavailable_mappings(
+    controller: AudioAnalysisController,
+    mock_mass: MagicMock,
+) -> None:
+    """Only mappings still marked available should be queued for background analysis."""
+    filesystem_provider = MagicMock()
+    filesystem_provider.domain = "filesystem_local"
+    filesystem_provider.available = True
+    audio_analysis_provider = MagicMock()
+    audio_analysis_provider.domain = "loudness_analysis"
+    audio_analysis_provider.available = True
+
+    mock_mass.get_providers = MagicMock(
+        side_effect=lambda provider_type: (
+            [filesystem_provider]
+            if provider_type == ProviderType.MUSIC
+            else [audio_analysis_provider]
+        )
+    )
+    mock_mass.music = MagicMock()
+    mock_mass.music.database = MagicMock()
+    mock_mass.music.database.get_rows_from_query = AsyncMock(return_value=[])
+
+    await controller._find_tracks_missing_analysis("loudness_analysis", limit=25)
+
+    query = mock_mass.music.database.get_rows_from_query.await_args.args[0]
+    assert "pm.available = 1" in query
