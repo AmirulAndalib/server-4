@@ -19,6 +19,7 @@ from music_assistant_models.enums import PlaybackState, PlayerFeature, PlayerTyp
 from music_assistant_models.errors import UnsupportedFeaturedException
 
 from music_assistant.controllers.players import PlayerController
+from music_assistant.controllers.players.controller import _SetMembersBatch
 from music_assistant.helpers.throttle_retry import Throttler
 from tests.common import MockPlayer, MockProvider
 
@@ -334,9 +335,7 @@ class TestSetMembersDebounce:
         assert adds == {"member_a", "member_b", "member_c"}
         assert removes == set()
 
-    async def test_add_then_remove_same_player_nets_to_remove(
-        self, mock_mass: MagicMock
-    ) -> None:
+    async def test_add_then_remove_same_player_nets_to_remove(self, mock_mass: MagicMock) -> None:
         """An add followed by a remove on the same player forwards only the remove."""
         controller = PlayerController(mock_mass)
         provider = MockProvider("test_provider", instance_id="test", mass=mock_mass)
@@ -377,9 +376,7 @@ class TestSetMembersDebounce:
         assert removes == {"member_x"}
         assert "member_x" not in adds
 
-    async def test_unrelated_targets_dont_block_each_other(
-        self, mock_mass: MagicMock
-    ) -> None:
+    async def test_unrelated_targets_dont_block_each_other(self, mock_mass: MagicMock) -> None:
         """Rapid adds on two different targets are each forwarded once."""
         controller = PlayerController(mock_mass)
         provider = MockProvider("test_provider", instance_id="test", mass=mock_mass)
@@ -402,8 +399,7 @@ class TestSetMembersDebounce:
             "member_y": member_y,
         }
         controller._player_throttlers = {
-            pid: Throttler(1, 0.05)
-            for pid in ("leader_a", "leader_b", "member_x", "member_y")
+            pid: Throttler(1, 0.05) for pid in ("leader_a", "leader_b", "member_x", "member_y")
         }
         mock_mass.players = controller
         for p in (leader_a, leader_b, member_x, member_y):
@@ -428,9 +424,7 @@ class TestSetMembersDebounce:
         assert {c[0] for c in handle_calls} == {"leader_a", "leader_b"}
         assert len(handle_calls) == 2
 
-    async def test_caller_awaits_until_flush_completes(
-        self, mock_mass: MagicMock
-    ) -> None:
+    async def test_caller_awaits_until_flush_completes(self, mock_mass: MagicMock) -> None:
         """cmd_set_members must not return before _handle_set_members ran."""
         controller = PlayerController(mock_mass)
         provider = MockProvider("test_provider", instance_id="test", mass=mock_mass)
@@ -519,6 +513,24 @@ class TestSetMembersDebounce:
         # the awaiting caller is unblocked via cancelled future -> CancelledError
         with contextlib.suppress(asyncio.CancelledError):
             await caller
+
+    async def test_empty_batch_resolves_waiting_future(self, mock_mass: MagicMock) -> None:
+        """A no-op batch must still unblock callers waiting on its future."""
+        controller = PlayerController(mock_mass)
+        batch = _SetMembersBatch()
+
+        await controller._flush_set_members_batch("leader", batch)
+
+        await asyncio.wait_for(asyncio.shield(batch.future), timeout=0.05)
+
+    async def test_gone_target_resolves_waiting_future(self, mock_mass: MagicMock) -> None:
+        """A gone target must not leave callers hanging on the batch future."""
+        controller = PlayerController(mock_mass)
+        batch = _SetMembersBatch(add={"member"})
+
+        await controller._flush_set_members_batch("gone-player", batch)
+
+        await asyncio.wait_for(asyncio.shield(batch.future), timeout=0.05)
 
 
 class TestStateForwarding:

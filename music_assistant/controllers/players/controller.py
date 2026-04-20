@@ -1253,12 +1253,16 @@ class PlayerController(ProtocolLinkingMixin, CoreController):
         """Apply a sealed set_members batch and resolve its future."""
         try:
             if not batch.add and not batch.remove:
+                if not batch.future.done():
+                    batch.future.set_result(None)
                 return
             parent_player = self.get_player(target_player_id)
             if parent_player is None:
                 self.logger.debug(
                     "Dropping coalesced set_members for gone player %s", target_player_id
                 )
+                if not batch.future.done():
+                    batch.future.set_result(None)
                 return
             player_ids_to_add = sorted(batch.add)
             player_ids_to_remove = sorted(batch.remove)
@@ -1276,9 +1280,7 @@ class PlayerController(ProtocolLinkingMixin, CoreController):
 
             # Play lock prevents protocol switches from racing with
             # concurrent play_media / play_index / resume / stop calls.
-            async with self.get_player_lock(
-                parent_player.player_id, PlayerLockPurpose.PLAYBACK
-            ):
+            async with self.get_player_lock(parent_player.player_id, PlayerLockPurpose.PLAYBACK):
                 await self._handle_set_members(
                     parent_player,
                     player_ids_to_add or None,
