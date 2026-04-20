@@ -10,6 +10,7 @@ from typing import Any, cast
 
 import aiohttp
 from music_assistant_models.enums import (
+    AlbumType,
     ContentType,
     ImageType,
     MediaType,
@@ -642,18 +643,20 @@ class SpotifyProvider(MusicProvider):
 
     async def get_artist_toptracks(self, prov_artist_id: str) -> list[Track]:
         """
-        Get all tracks for an artist by collecting tracks from all their albums.
+        Get top tracks for an artist.
 
-        For large discographies, returns initial results quickly and fetches
-        remaining albums in the background. Complete results are cached for 14 days;
-        partial results are cached for 20 minutes while background fetch completes.
+        :param prov_artist_id: Spotify artist id.
         """
+        # the artist album list is cached for 14 days and each album's track list
+        # is cached for 1 year, so repeat calls for an artist incur no API calls
         cache_key = f"artist_toptracks.{prov_artist_id}"
 
         if cached := await self.mass.cache.get(cache_key, provider=self.instance_id):
             return [Track.from_dict(t) for t in cached]
 
         albums = await self.get_artist_albums(prov_artist_id)
+        # walk studio albums only to minimise API calls
+        albums = [a for a in albums if a.album_type == AlbumType.ALBUM]
         if not albums:
             return []
 
@@ -680,6 +683,8 @@ class SpotifyProvider(MusicProvider):
 
         remaining_albums = albums[initial_album_count:]
         if remaining_albums:
+            # return initial results quickly; the background task below will overwrite
+            # this cache entry with the full result once all remaining albums are walked
             await self.mass.cache.set(
                 cache_key,
                 [t.to_dict() for t in result],
