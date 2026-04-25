@@ -60,14 +60,31 @@ class ArtistRole(StrEnum):
     CHOIR = "choir"
     SOLOIST = "soloist"                # featured performer (usually with an instrument)
     PERFORMER = "performer"            # any other performing musician
-    REMIXER = "remixer"
-    PRODUCER = "producer"
 ```
 
 Notes:
 
 - `MAIN_ARTIST` exists so credits can be a complete list including the headline credit — i.e. the artists in `Track.artists` will appear in `Track.credits` with `role=MAIN_ARTIST`.
-- The set is opinionated but not exhaustive. If we hit a role that doesn't fit, we add it. The enum is forward-compatible because consumers can fall back to `PERFORMER` for unknown values.
+- The set is scoped to roles that matter for classical music. Pop/electronic roles (`REMIXER`) and general production roles (`PRODUCER`) are intentionally omitted — they can be added in a later stage if a consumer needs them.
+- The enum is forward-compatible: consumers should fall back to `PERFORMER` for unknown values added in the future.
+
+### Populating `ORCHESTRA` / `ENSEMBLE` / `CHOIR` / `SOLOIST`
+
+There is **no dedicated tag** for any of these four roles. They are derived from two sources:
+
+**1. Parsing the parenthetical content of `PERFORMER` (Vorbis) / `TMCL` (ID3).** Picard's convention is `PERFORMER="Name (role-or-instrument)"`. The parser in Stage 4 maps the parens content as follows:
+
+| Parens contains (case-insensitive substring) | Mapped role |
+|---|---|
+| `orchestra`, `philharmonic`, `symphony orchestra` | `ORCHESTRA` |
+| `choir`, `chorus`, `chorale`, `schola` | `CHOIR` |
+| `ensemble`, `quartet`, `quintet`, `trio`, `consort` | `ENSEMBLE` |
+| Specific instrument (`violin`, `piano`, `soprano vocals`, …) | `SOLOIST`, with `instrument` set to the parens content |
+| Empty or unrecognised | `PERFORMER`, with `instrument` set to the parens content if present |
+
+This is a heuristic, but mirrors how Picard-tagged libraries are structured in practice. No information is lost when the heuristic falls through — anything unrecognised becomes `PERFORMER` with the original string preserved as `instrument`.
+
+**2. MusicBrainz enrichment (Stage 6).** MusicBrainz models these as distinct Recording-Artist relationship types — `performing orchestra`, `chorus`, `instrument` (with instrument attribute), `performer` — and the enrichment provider maps them directly to the corresponding `ArtistRole`. This is canonical when MB data is available; the tag heuristic only fills the gap when it isn't.
 
 ### `Credit` (dataclass)
 
@@ -305,11 +322,10 @@ The expectation is that the server PR ships first (populating the new fields), t
 
 ## Open questions
 
-1. **`ArtistRole` exhaustiveness.** Should we include LYRICIST/ARRANGER/REMIXER/PRODUCER from the start, or wait until they have a concrete consumer? Leaning toward including them — they cost nothing and let the parser preserve information.
-2. **Duplication between `artists` and `credits[role=MAIN_ARTIST]`.** Acceptable for non-breaking but ugly. Should we document a rule for how the server keeps them in sync, or treat one as canonical and the other as derived? Leaning toward: `artists` is the canonical headline credit; `credits` is canonical for everyone else; consumers reading `credits` see MAIN_ARTIST entries that mirror `artists`.
-3. **Movements as Works vs. just movement fields.** Do we always create a movement-Work and link the Track to it (parent_work pointing at the parent), or do we only create the parent Work and use the Track's `movement_*` fields? MusicBrainz models movements as their own Works, so the former is more faithful and gives every movement an MBID — but it explodes Work row counts. Recommend: parent Work only, `movement_*` on Track, **unless** the source has an MBID for the movement-Work specifically, in which case create it. Worth confirming.
-4. **`WorkType` granularity.** Mirror MusicBrainz exactly, or simplify? MusicBrainz has ~25 types; the proposed enum has 12. Open to expanding if there's demand.
-5. **`Credit.position` semantics.** Per-role ordering (proposed) or global ordering across roles? Per-role is simpler to reason about, global is closer to how a credits booklet reads. Per-role probably wins.
+1. **Duplication between `artists` and `credits[role=MAIN_ARTIST]`.** Acceptable for non-breaking but ugly. Should we document a rule for how the server keeps them in sync, or treat one as canonical and the other as derived? Leaning toward: `artists` is the canonical headline credit; `credits` is canonical for everyone else; consumers reading `credits` see MAIN_ARTIST entries that mirror `artists`.
+2. **Movements as Works vs. just movement fields.** Do we always create a movement-Work and link the Track to it (parent_work pointing at the parent), or do we only create the parent Work and use the Track's `movement_*` fields? MusicBrainz models movements as their own Works, so the former is more faithful and gives every movement an MBID — but it explodes Work row counts. Recommend: parent Work only, `movement_*` on Track, **unless** the source has an MBID for the movement-Work specifically, in which case create it. Worth confirming.
+3. **`WorkType` granularity.** Mirror MusicBrainz exactly, or simplify? MusicBrainz has ~25 types; the proposed enum has 12. Open to expanding if there's demand.
+4. **`Credit.position` semantics.** Per-role ordering (proposed) or global ordering across roles? Per-role is simpler to reason about, global is closer to how a credits booklet reads. Per-role probably wins.
 
 ## Out of scope (future work)
 
