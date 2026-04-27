@@ -12,7 +12,9 @@ from tests.common import wait_for_sync_completion
 
 
 @pytest.fixture
-async def bandcamp_provider(mass: MusicAssistant) -> AsyncGenerator[ProviderConfig, None]:
+async def bandcamp_provider(  # noqa: PLR0915
+    mass: MusicAssistant,
+) -> AsyncGenerator[ProviderConfig, None]:
     """Configure a Bandcamp test fixture, and add a provider to mass that uses it."""
     # Mock the BandcampAPIClient to avoid real API calls
     with mock.patch("music_assistant.providers.bandcamp.BandcampAPIClient") as mock_client_class:
@@ -55,6 +57,10 @@ async def bandcamp_provider(mass: MusicAssistant) -> AsyncGenerator[ProviderConf
         mock_album.art_url = "https://f4.bcbits.com/img/a1234567890_16.jpg"
         mock_album.release_date = 1609459200
         mock_album.about = "Test album description"
+        # Concrete performer credit string — the converter feeds it to
+        # slugify_performer which only accepts strings. None means
+        # "no separate performer; the album is by the band itself".
+        mock_album.tralbum_artist = None
 
         mock_track = mock.AsyncMock()
         mock_track.id = 789
@@ -65,6 +71,7 @@ async def bandcamp_provider(mass: MusicAssistant) -> AsyncGenerator[ProviderConf
         mock_track.streaming_url = {"mp3-320": "https://example.com/track.mp3"}
         mock_track.track_number = 1
         mock_track.lyrics = "Test lyrics"
+        mock_track.tralbum_artist = None
 
         # Configure the streaming_url to behave like a dictionary
         mock_track.configure_mock(streaming_url={"mp3-320": "https://example.com/track.mp3"})
