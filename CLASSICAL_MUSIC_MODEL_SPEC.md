@@ -270,6 +270,48 @@ A track containing only part of a Work (e.g. just *The Great Gate of Kiev* from 
 
 This is not a model concern but worth flagging since it informs query design downstream: real classical libraries hit the tens of thousands of tracks per composer (8000+ Bach tracks is realistic). The composer-level browse view in the Classical view **must be Work-grouped, not a flat track list** — a composer page is a list of Works first, with recordings nested underneath. The data shape supports this; the server queries and frontend pagination need to deliver it efficiently.
 
+## Classification policy
+
+Two related runtime decisions: (1) when does a track get a `Work` entity attached, and (2) when does a track appear in the Classical view? The rules differ because the cost of getting them wrong differs.
+
+### When to create a `Work` entity
+
+**Conservative.** A Work should be created only when there is positive evidence that the track is part of a defined composition. In priority order:
+
+1. **`MUSICBRAINZ_WORKID` is present** → match or create the Work; canonical signal.
+2. **`WORK` tag is present** (or the plugin fallbacks `groupheading` / `top_work`) → create the Work, deduplicate by composer + title.
+3. **Composer is present AND movement info is present** (`MOVEMENTNAME`, `MOVEMENTNUMBER`, or `groupheading`) → infer a Work from the available signal. Multiple movements implies a multi-part composition.
+4. **Otherwise: no Work.** A track with only a composer credit and nothing else does **not** become a Work.
+
+The reason for being strict: a permissive rule (any composer credit → Work) pollutes the Works browse with thousands of one-offs from film scores, jazz standards, hip-hop sampling credits, and singer-songwriters who self-credit. The Works browse loses its value if it isn't restricted to actual compositions.
+
+### When a track appears in the Classical view
+
+**More liberal.** False negatives (classical track missing) feel broken; false positives (a soundtrack track appearing) feel mildly annoying. Default toward inclusion. A track appears in the Classical view if **any** of:
+
+1. **`is_classical=1` tag is set** — explicit user signal, definitive.
+2. **Track has a `Work` attached** (per the Work-creation rules above) — definitive.
+3. **Genre tag matches a classical genre** (Classical, Baroque, Symphony, Concerto, Opera, Sonata, Choral, Chamber music, …).
+4. **Track is on an album classified as classical** (see album-level rule below).
+
+### Album-level classical classification
+
+An album is classified as classical if a majority of its tracks satisfy any of the per-track rules above. Once an album is classical, **all** its tracks appear in the Classical view, even ones with thin metadata. This catches the "single Pärt track on a compilation that didn't get tagged with `is_classical`" case — the rest of the album is classical, so the under-tagged track inherits.
+
+### Expected outcomes
+
+| Library content | Outcome |
+|---|---|
+| Bach box-set with full tags (Work + composer per track) | All tracks in Classical view, grouped under hundreds of Works |
+| Pärt compilation with thin tags | All tracks in Classical view via album-level inheritance |
+| Hans Zimmer film score (composer credits, "Soundtrack" genre, no Work info) | **Not** in Classical view; no Works created |
+| Jazz album with composer credits ("Take Five" — Paul Desmond) | **Not** in Classical view; no Works |
+| Singer-songwriter album where artist self-credits as composer | **Not** in Classical view; no Works |
+
+### User overrides (future polish)
+
+A per-track or per-album "treat as classical" / "exclude from classical" override is the cleanest fix for users whose libraries don't match these defaults — e.g. someone who *does* want their Williams scores in the Classical view, or who *doesn't* want a particular contemporary album. Same mechanism works for hiding individual tracks from the view without retagging. Out of scope for Phase 1; additive when added.
+
 ## Examples
 
 A track from "Karajan conducts Beethoven Symphony No. 5", second movement:
