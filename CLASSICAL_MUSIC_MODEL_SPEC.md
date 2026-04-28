@@ -121,6 +121,7 @@ class Work(MediaItem):
     catalog_numbers: list[str] = field(default_factory=list)   # ["Op. 67", "BWV 1041", "K. 525"]
     work_type: WorkType | None = None
     parent_work: ItemMapping | None = None                     # for movements / sub-works
+    arrangement_of: list[ItemMapping] = field(default_factory=list)   # source work(s) this is an arrangement of
     # inherited: item_id, name, sort_name, version, favorite, metadata, external_ids, …
 ```
 
@@ -148,6 +149,7 @@ Notes:
 - `Work` is a full MediaItem so it gets `external_ids` (for the MusicBrainz Work MBID), images, descriptions, sort_name, search_name, etc. for free.
 - `catalog_numbers` is a list because the same work can have multiple catalog references (Op. number plus a thematic catalog like K. or BWV). Stored as strings; parsing/sorting is a presentation concern.
 - `parent_work` is optional and self-referential. Movements model as separate Works with a parent link, mirroring MusicBrainz. Whether a Track points at a movement-Work or directly at the parent Work is a tagging choice and the Track stores `movement_number` either way.
+- `arrangement_of` captures transcriptions, orchestrations, and reductions where one Work is derived from another (Mussorgsky's *Pictures at an Exhibition* piano original ↔ Ravel's orchestration; Bach organ works transcribed for piano; opera scenes transcribed for solo instrument). MusicBrainz models these as distinct Works connected by an "arrangement of" relationship. The list form handles medleys and works arranged from multiple sources. The reverse direction ("which works are arrangements of *this* one") is derived by querying — not stored.
 - `MediaType.WORK` is a new variant of the existing `MediaType` enum.
 
 ### `MediaType.WORK`
@@ -233,8 +235,40 @@ A reference for the server-side parser/provider work in later stages. Each new m
 | `Track.movement_total` | `MOVEMENTTOTAL` | `MVIN` (total part) | `©mvc` | — |
 | `Work.catalog_numbers` | (embedded in WORK title by convention) | (same) | (same) | Work catalog-number attributes |
 | `Work.work_type` | — | — | — | Work `type` field |
+| `Work.arrangement_of` | — | — | — | Work-Work "arrangement of" relationship |
 
-Tags with no MusicBrainz equivalent (e.g. some `TXXX` fields written by certain taggers) and MB fields with no tag equivalent (conductor MBID, performer MBIDs) are accepted gracefully — the parser fills what it can; the enrichment provider fills the rest.
+Tags with no MusicBrainz equivalent (e.g. some `TXXX` fields written by certain taggers) and MB fields with no tag equivalent (conductor MBID, performer MBIDs, arrangement relationships) are accepted gracefully — the parser fills what it can; the enrichment provider fills the rest.
+
+## Matching policy
+
+How instances of these entities are matched and grouped at runtime. This belongs in the spec because it constrains what the data shape needs to support; the actual matching code lives in the server.
+
+### Work matching
+
+**MusicBrainz Work MBID is the only reliable signal for "same Work".** No fuzzy match on composer + work title can reliably catch:
+
+- Translations: *Spiegel im Spiegel* / *Mirror in the Mirror* / *Miroir dans le miroir* — same MB Work, no string overlap.
+- Catalog-number variants: "Op. 67" / "Opus 67" / "5th symphony" / "Symphony No. V" — same Work, varying tag conventions.
+- MB editor stylistic differences: original-language vs locale-aliased titles.
+
+The matching rule is therefore:
+
+1. **MBID match → same Work, merge.** Multiple recordings, multi-language tag variants, and box-set vs single-album appearances all collapse correctly when MBIDs are present.
+2. **No MBID, exact composer + title match → same Work, merge.** Conservative; only catches the easy cases.
+3. **No MBID, fuzzy match → suggestion only.** Surface as a "these might be the same work" link via the existing OTHER VERSIONS UI pattern. Never auto-merge.
+4. **No match at all → composer-first browsing is the human fallback.** The Classical view's composer index lets the user navigate Bach → his works → recordings of each, and find related items manually even when matching fails. This is what classical listeners already do; we just make it faster.
+
+### Arrangements
+
+Arrangements/transcriptions are deliberately **separate** Works in MusicBrainz, linked via the "arrangement of" relationship — captured in `Work.arrangement_of`. They must not be auto-merged with their source work, but the Work page should surface the relationship as "related works" (Mussorgsky's piano original ↔ Ravel's orchestration; Bach organ ↔ piano transcriptions). The bidirectional relationship is stored once (on the arrangement) and queried in both directions.
+
+### Partial recordings
+
+A track containing only part of a Work (e.g. just *The Great Gate of Kiev* from *Pictures at an Exhibition*) is modelled in MusicBrainz as a Recording-Work relationship with a "partial" attribute. See open questions for whether to surface this as a Track flag.
+
+### Scale considerations
+
+This is not a model concern but worth flagging since it informs query design downstream: real classical libraries hit the tens of thousands of tracks per composer (8000+ Bach tracks is realistic). The composer-level browse view in the Classical view **must be Work-grouped, not a flat track list** — a composer page is a list of Works first, with recordings nested underneath. The data shape supports this; the server queries and frontend pagination need to deliver it efficiently.
 
 ## Examples
 
@@ -326,6 +360,7 @@ The expectation is that the server PR ships first (populating the new fields), t
 2. **Movements as Works vs. just movement fields.** Do we always create a movement-Work and link the Track to it (parent_work pointing at the parent), or do we only create the parent Work and use the Track's `movement_*` fields? MusicBrainz models movements as their own Works, so the former is more faithful and gives every movement an MBID — but it explodes Work row counts. Recommend: parent Work only, `movement_*` on Track, **unless** the source has an MBID for the movement-Work specifically, in which case create it. Worth confirming.
 3. **`WorkType` granularity.** Mirror MusicBrainz exactly, or simplify? MusicBrainz has ~25 types; the proposed enum has 12. Open to expanding if there's demand.
 4. **`Credit.position` semantics.** Per-role ordering (proposed) or global ordering across roles? Per-role is simpler to reason about, global is closer to how a credits booklet reads. Per-role probably wins.
+5. **Partial recording flag.** Should `Track` carry an `is_partial_recording: bool` to indicate that the track is only an excerpt of its linked Work (e.g. one section of a multi-section work, not represented as its own movement-Work)? Additive; could be added in a later release without breaking anything. Recommend deferring unless a concrete consumer needs it.
 
 ## Out of scope (future work)
 
