@@ -396,6 +396,18 @@ Old consumers continue to work unchanged. To opt in:
 
 The expectation is that the server PR ships first (populating the new fields), then frontend adopts at its own pace.
 
+## Frontend integration approach
+
+This spec only defines the data shape, not the UI. But one frontend decision is worth recording here because reviewers will ask: **how does classical surface in the navigation?**
+
+**Decided: a single top-level "Classical" entry with internal tabs.** The tabs (Composers / Works / Conductors / Ensembles / Search) are sub-navigation *inside* the Classical view, not separate top-level menu items.
+
+- **Why a single top-level entry, not several** (i.e. not promoting Composers / Works / Conductors to main-nav siblings of Artists / Albums): the main nav is already approaching capacity and reserving space for upcoming shortcuts; classical sub-views are only useful to users with classical content; promoting them clutters the nav for everyone for the benefit of some.
+- **Why internal tabs, not a flat single-list view**: classical listeners come into the library from genuinely different entry points (composer-first, conductor-first, work-first). No single ordering serves all of them, so the entry point is itself a choice the user makes.
+- **Trade-off acknowledged**: sub-tabs inside a top-level view is a new UI pattern for MA. No existing view does this. Worth raising explicitly in the frontend PR so it's a deliberate decision rather than a precedent set by accident.
+
+Detail pages reuse existing patterns where possible — Composer detail mirrors Artist detail (different listing inside), Work detail is shaped like Album detail (different relationships), and the OTHER VERSIONS section already used for cross-provider album linking is the natural home for "these recordings might be the same Work" suggestions when MBID matching fails. The only genuinely new page type is the **Work detail page**, which collapses multiple recordings of one composition into a single browseable entry.
+
 ## Open questions
 
 1. **Duplication between `artists` and `credits[role=MAIN_ARTIST]`.** Acceptable for non-breaking but ugly. Should we document a rule for how the server keeps them in sync, or treat one as canonical and the other as derived? Leaning toward: `artists` is the canonical headline credit; `credits` is canonical for everyone else; consumers reading `credits` see MAIN_ARTIST entries that mirror `artists`.
