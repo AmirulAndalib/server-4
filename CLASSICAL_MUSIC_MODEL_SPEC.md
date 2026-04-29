@@ -1,8 +1,9 @@
-# Classical music model spec (Stage 1)
+# Classical music support — design spec
 
-**Target repo:** `music-assistant-models`
 **Status:** Draft for discussion
-**Goal:** Add first-class classical-music metadata to the shared models package, in a fully backwards-compatible way, so downstream consumers (server, frontend, HA integration, third-party) can adopt incrementally.
+**Scope:** Full design across all stages — model, schema, parsing, providers, enrichment, frontend.
+**Stage 1 (model changes) PR doc:** `CLASSICAL_MUSIC_STAGE_1_MODELS.md`
+**Community proposal:** `CLASSICAL_MUSIC_PROPOSAL.md`
 
 ## Background
 
@@ -23,11 +24,28 @@ Standard tags (Picard mapping) and MusicBrainz both already model this richer st
 
 ## Non-goals
 
-- Database schema changes (separate PR in the server repo).
-- Tag parsing changes (separate PR).
-- Streaming provider changes (separate PR per provider).
-- Frontend changes (separate PR in the frontend repo).
 - A "period" (Baroque/Classical/Romantic) field — there is no standard tag or MusicBrainz field for this, and it can be derived from genre tags or composer dates. Out of scope.
+- Rewriting users' existing tags. Local tags are authoritative; we never overwrite or strip a tagged value.
+- Replacing the existing flat `Track.artists` / `Album.artists` fields. New role-typed credits sit alongside.
+
+## Implementation stages
+
+The work splits across two repos and several PRs. Each stage is independently deployable; later stages depend on earlier ones for data shape but not for behaviour.
+
+| # | Stage | Repo | Depends on | Summary |
+|---|---|---|---|---|
+| 1 | **Model changes** | `music-assistant-models` | — | New `Work` MediaItem, `ArtistRole` enum, `Credit` type, additive fields on `Track`/`Album`. Fully non-breaking. *(See `CLASSICAL_MUSIC_STAGE_1_MODELS.md`.)* |
+| 2 | **Database schema & migrations** | `music-assistant/server` | 1 | New `works` table, `work_arrangements` junction, `work_id`/`movement_*` columns on `tracks`, `role`/`instrument`/`position` columns on `track_artists` and `album_artists`. Migration backfills existing rows with `role=MAIN_ARTIST`. |
+| 3 | **Server controllers & API** | `music-assistant/server` | 2 | New `WorksController`. `TracksController` and `AlbumsController` extended for role-typed credits and work linkage. WebSocket commands for work browse, role-filtered track queries, classical-narrowed search. Comparison/dedup updated to use Work MBID. |
+| 4 | **Local file tag parsing** | `music-assistant/server` | 3 | `helpers/tags.py` reads `COMPOSER` / `CONDUCTOR` / `PERFORMER` / `WORK` / `MOVEMENT*` / role-suffixed `PERFORMER:instrument` / `TMCL` pairs across Vorbis / ID3 / MP4 / APEv2. Plus a small fallback set for Classical Extras tags (`groupheading`, `top_work`, `is_classical`, `movement`). Local-file users get the full Classical view at this point. |
+| 5 | **Streaming provider mapping** | `music-assistant/server` | 3 | Per-provider PRs: Qobuz (resolves existing TODO), Apple Music (composer mapping fix), Subsonic-compatible (structured contributors), and audit of Tidal/Spotify/Deezer/YouTube Music. Independent and parallelisable per provider. |
+| 6 | **MusicBrainz enrichment** | `music-assistant/server` | 3 | Extends the MB provider beyond ID-only fetching to pull Recording-Artist relationships (composer/conductor/performer with instruments), Recording-Work links, Work entity metadata (type, catalog numbers, parent work), and Work-Work arrangement relationships. Fills gaps where local tags or streaming providers fall short. **Strict rule: enrich-don't-override** — never overwrite a value the source already supplied. |
+| 7 | **Frontend Classical view** | `music-assistant/frontend` | 3 | New top-level "Classical" entry with internal tabs (Composers / Works / Conductors / Ensembles / Search). Composer detail page (works listed, not albums), Work detail page (recordings collapsed under one composition), extended Track credits panel, classical-narrowed search facets, OTHER VERSIONS reused for unmatched-Work suggestions. |
+| 8 | **Playback / queue behaviour** | `music-assistant/server` (+ frontend) | 7 | "Play Work" enqueues all movements in order. No shuffle within a Work by default. Gapless across movements of the same Work. |
+
+Cross-cutting work that rides along: tests at every stage, docs, a "tagging your classical library" guide for users, and a provider-compatibility table showing what each streaming provider exposes.
+
+**Suggested delivery order:** 1 → 2 → 3, then 4 + 5 + 6 in parallel, then 7, with 8 as polish. Stage 4 alone gives well-tagged local-library users a complete Classical experience, so it's a natural early demo milestone. Each stage will be socialised with a short summary doc before implementation begins.
 
 ## Backwards compatibility
 
@@ -41,6 +59,15 @@ This change is **additive only**. No existing field changes type or is removed.
 | `Track.metadata.grouping: str \| None` | Kept; deprecated in docstring. | Replaced in semantics by `Track.work` when present. Acts as fallback when no Work tag exists. |
 
 Old consumers continue working unchanged. New consumers opt in by reading the new fields. A future major version may collapse the duplication.
+
+### Synchronisation rule for `artists` vs `credits[role=MAIN_ARTIST]`
+
+Both fields can carry the headline credit, which raises the question of which is canonical when they're populated together. The rule:
+
+- **`artists` is canonical for the headline credit.** It's the field consumers have been reading for years; we don't break that contract.
+- **`credits` is canonical for everyone else** (composer, conductor, performers, etc.) — those don't appear in `artists` at all.
+- **When `credits` is populated, every artist in `artists` must also appear as a `MAIN_ARTIST` entry in `credits`**, in the same order, with `position` matching the index in `artists`. The server is responsible for keeping the two in sync; consumers can trust either.
+- A consumer reading only `credits` and filtering for `role=MAIN_ARTIST` gets the same result as reading `artists`. A consumer reading only `artists` misses non-headline roles but doesn't see anything inconsistent.
 
 ## New types
 
@@ -102,7 +129,7 @@ class Credit:
 Notes:
 
 - Free-form `instrument` string is intentional. Picard writes "violin", "piano", "soprano vocals", etc. in the Vorbis `PERFORMER` parens convention; we keep the string as-is rather than enumerate.
-- `position` lets the UI render credits in the order they were tagged (first violin before second violin, lead vocal before backing vocals, etc.) without forcing alphabetical.
+- `position` is **per-role**: each role group has its own ordering starting at 0. So a track with two SOLOIST entries and three PERFORMER entries has positions 0–1 within SOLOIST and 0–2 within PERFORMER, not a global 0–4 sequence. Simpler to reason about, easier to render, and avoids conflating ordering across heterogeneous roles.
 - Composer Sort Order, MusicBrainz Composer ID, and similar per-role tags do not need separate fields — they are stored on the underlying `Artist` (`sort_name`, `external_ids`).
 
 ### `Work` (MediaItem)
@@ -148,7 +175,8 @@ Notes:
 
 - `Work` is a full MediaItem so it gets `external_ids` (for the MusicBrainz Work MBID), images, descriptions, sort_name, search_name, etc. for free.
 - `catalog_numbers` is a list because the same work can have multiple catalog references (Op. number plus a thematic catalog like K. or BWV). Stored as strings; parsing/sorting is a presentation concern.
-- `parent_work` is optional and self-referential. Movements model as separate Works with a parent link, mirroring MusicBrainz. Whether a Track points at a movement-Work or directly at the parent Work is a tagging choice and the Track stores `movement_number` either way.
+- `WorkType` covers the most common 12 types plus `OTHER`. MusicBrainz has ~25 types; the proposed enum covers the ones that matter for browsing/grouping. `OTHER` catches the long tail. Adding new variants later is non-breaking — consumers should fall back to `OTHER` for unknown values.
+- `parent_work` is optional and self-referential. Movements *can* be modelled as separate Works with a parent link (mirroring MusicBrainz), but the **default rule is parent Work only, with `movement_*` fields on Track**. A movement-Work row is created only when the source supplies a distinct MBID for it (i.e. the file's `MUSICBRAINZ_WORKID` points to the movement, or MB enrichment surfaces a movement-level Work entity). This avoids a row-count explosion — a Bach library with 8000 tracks would otherwise produce 8000+ Work rows for movement entities alone.
 - `arrangement_of` captures transcriptions, orchestrations, and reductions where one Work is derived from another (Mussorgsky's *Pictures at an Exhibition* piano original ↔ Ravel's orchestration; Bach organ works transcribed for piano; opera scenes transcribed for solo instrument). MusicBrainz models these as distinct Works connected by an "arrangement of" relationship. The list form handles medleys and works arranged from multiple sources. The reverse direction ("which works are arrangements of *this* one") is derived by querying — not stored.
 - `MediaType.WORK` is a new variant of the existing `MediaType` enum.
 
@@ -408,17 +436,24 @@ This spec only defines the data shape, not the UI. But one frontend decision is 
 
 Detail pages reuse existing patterns where possible — Composer detail mirrors Artist detail (different listing inside), Work detail is shaped like Album detail (different relationships), and the OTHER VERSIONS section already used for cross-provider album linking is the natural home for "these recordings might be the same Work" suggestions when MBID matching fails. The only genuinely new page type is the **Work detail page**, which collapses multiple recordings of one composition into a single browseable entry.
 
-## Open questions
+## Decisions log
 
-1. **Duplication between `artists` and `credits[role=MAIN_ARTIST]`.** Acceptable for non-breaking but ugly. Should we document a rule for how the server keeps them in sync, or treat one as canonical and the other as derived? Leaning toward: `artists` is the canonical headline credit; `credits` is canonical for everyone else; consumers reading `credits` see MAIN_ARTIST entries that mirror `artists`.
-2. **Movements as Works vs. just movement fields.** Do we always create a movement-Work and link the Track to it (parent_work pointing at the parent), or do we only create the parent Work and use the Track's `movement_*` fields? MusicBrainz models movements as their own Works, so the former is more faithful and gives every movement an MBID — but it explodes Work row counts. Recommend: parent Work only, `movement_*` on Track, **unless** the source has an MBID for the movement-Work specifically, in which case create it. Worth confirming.
-3. **`WorkType` granularity.** Mirror MusicBrainz exactly, or simplify? MusicBrainz has ~25 types; the proposed enum has 12. Open to expanding if there's demand.
-4. **`Credit.position` semantics.** Per-role ordering (proposed) or global ordering across roles? Per-role is simpler to reason about, global is closer to how a credits booklet reads. Per-role probably wins.
-5. **Partial recording flag.** Should `Track` carry an `is_partial_recording: bool` to indicate that the track is only an excerpt of its linked Work (e.g. one section of a multi-section work, not represented as its own movement-Work)? Additive; could be added in a later release without breaking anything. Recommend deferring unless a concrete consumer needs it.
+Records of the substantive design questions that came up during drafting and their resolutions, so reviewers don't have to re-litigate them.
+
+1. **Duplication between `artists` and `credits[role=MAIN_ARTIST]`.** *Resolved:* `artists` canonical for headline; `credits` canonical for non-headline roles; server keeps `MAIN_ARTIST` entries in `credits` mirroring `artists`. (See "Synchronisation rule" under Backwards compatibility.)
+2. **Movements as Works vs. just movement fields.** *Resolved:* parent Work only with `movement_*` fields on Track is the default. Movement-Works only created when the source supplies a distinct MBID for them. (See `Work` notes.)
+3. **`WorkType` granularity.** *Resolved:* 12 common types + `OTHER`. Easy to extend later; consumers should fall back to `OTHER` for unknown values.
+4. **`Credit.position` semantics.** *Resolved:* per-role ordering, each role group starts at 0.
+5. **Period / era field.** *Resolved:* out of scope. No canonical source (no standard tag, no MB field). Genre tags cover this for users who want it.
+6. **Promoting classical sub-views to main nav vs. internal tabs.** *Resolved:* single top-level "Classical" entry with internal tabs. Main nav approaching capacity; classical sub-views only useful to users with classical content. (See "Frontend integration approach".)
+7. **Whether to recommend Classical Extras (Picard plugin) to users.** *Resolved:* no blanket recommendation. Plugin produces wrong data when MB lacks Work info (the Vivaldi/Kennedy case), can destructively rewrite `ARTIST`, and configuration variance is enormous. We support its common output tag names as parser fallbacks but do not endorse it. (See parser policy in the Stage 4 doc when written.)
 
 ## Out of scope (future work)
 
 - Period / era field (no canonical source; derive from genres or composer dates if needed).
+- `Track.is_partial_recording` flag for tracks that are only an excerpt of their linked Work. Additive when added.
 - Lyricist / librettist relationships beyond the basic `LYRICIST` role.
 - Recording-level metadata (recording date, venue, producer credits beyond the basic role).
 - Multi-disc opera structure beyond what `parent_work` already supports.
+- Per-track / per-album "treat as classical" / "exclude from classical" override (Classical view inclusion).
+- "Composer as primary artist for classical" toggle (iTunes-style headline rewriting in non-Classical browse views).
