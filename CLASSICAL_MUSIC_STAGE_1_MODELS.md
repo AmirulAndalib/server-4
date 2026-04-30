@@ -31,12 +31,14 @@ Stage 1 is the **model package only**. The wider rollout is split across stages 
 |---|---|---|
 | **1** | **Model changes** *(this PR)* | `music-assistant-models` |
 | 2 | Database schema & migrations | `music-assistant/server` |
-| 3 | Server controllers & API | `music-assistant/server` |
+| 3 | Server controllers & API (no search) | `music-assistant/server` |
 | 4 | Local file tag parsing | `music-assistant/server` |
 | 5 | Streaming provider mapping | `music-assistant/server` |
 | 6 | MusicBrainz enrichment | `music-assistant/server` |
-| 7 | Frontend Classical view | `music-assistant/frontend` |
-| 8 | Playback / queue behaviour | both |
+| 7 | Frontend Classical view (no search) | `music-assistant/frontend` |
+| 8 | Basic global Classical search (chip + flat 50 results) | both |
+| 9 | Refined classical search (nested chip hierarchy) | both |
+| 10 | Playback / queue behaviour | both |
 
 Stage 1 deliberately ships the data shape with no consumers populating it yet. Once merged and released, the server PRs (Stages 2–6) can pin to the new model version and start filling the fields.
 
