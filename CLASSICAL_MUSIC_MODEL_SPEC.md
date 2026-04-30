@@ -426,13 +426,32 @@ The expectation is that the server PR ships first (populating the new fields), t
 
 ## Frontend integration approach
 
-This spec only defines the data shape, not the UI. But one frontend decision is worth recording here because reviewers will ask: **how does classical surface in the navigation?**
+This spec only defines the data shape, not the UI. But two frontend decisions are worth recording here because reviewers will ask.
 
-**Decided: a single top-level "Classical" entry with internal tabs.** The tabs (Composers / Works / Conductors / Ensembles / Search) are sub-navigation *inside* the Classical view, not separate top-level menu items.
+### Where it lives in the navigation
 
-- **Why a single top-level entry, not several** (i.e. not promoting Composers / Works / Conductors to main-nav siblings of Artists / Albums): the main nav is already approaching capacity and reserving space for upcoming shortcuts; classical sub-views are only useful to users with classical content; promoting them clutters the nav for everyone for the benefit of some.
-- **Why internal tabs, not a flat single-list view**: classical listeners come into the library from genuinely different entry points (composer-first, conductor-first, work-first). No single ordering serves all of them, so the entry point is itself a choice the user makes.
+**Decided: a single top-level "Classical" entry with internal tabs.** Sub-navigation lives *inside* the Classical view, not as separate top-level menu items.
+
+- **Why a single top-level entry, not several** (i.e. not promoting Composers / Works / Performers to main-nav siblings of Artists / Albums): the main nav is already approaching capacity and reserving space for upcoming shortcuts; classical sub-views are only useful to users with classical content; promoting them clutters the nav for everyone for the benefit of some.
+- **Why internal tabs, not a flat single-list view**: classical listeners come into the library from genuinely different entry points (composer-first, performer-first, work-first). No single ordering serves all of them, so the entry point is itself a choice the user makes.
 - **Trade-off acknowledged**: sub-tabs inside a top-level view is a new UI pattern for MA. No existing view does this. Worth raising explicitly in the frontend PR so it's a deliberate decision rather than a precedent set by accident.
+
+### Tab layout inside the Classical view
+
+**Decided: four tabs — Composers / Works / Performers / Search.**
+
+- **Composers** — index of artists who appear with `role=COMPOSER` in any track's credits. Click → composer detail page (works listed underneath, not albums).
+- **Works** — index of `Work` entities. Click → Work detail page (multiple recordings of the same composition collapsed under one entry).
+- **Performers** — index of artists who appear in any non-composer role. **Filter chips at the top of the tab let the user narrow by role:** *All / Conductors / Orchestras / Chamber groups / Choirs / Soloists*. The chip pattern reuses the existing filter convention in MA (e.g. the album-type filter that lets users narrow to "live", "soundtrack", etc.). Click an entry → performer detail page (works performed, conductors collaborated with, recordings in library).
+- **Search** — global-search-style box that searches across composers, works, performers, and tracks, with optional further chips for narrowing (composer / conductor / orchestra / instrument / work).
+
+**Why one Performers tab instead of separate Conductors / Ensembles tabs:** classical listeners think in terms of "who's playing this" — and the answer might be a person (conductor, soloist) or a group (orchestra, ensemble, choir). Splitting into two tabs duplicates the navigation; combining with role chips gives the same browsing power with less surface area. Chamber music and a-cappella choral music — which have no conductor — are also covered naturally by this single-tab approach, where a separate Conductors tab would miss them.
+
+### Future polish: instrument filter
+
+When the Performers tab is filtered to *Soloists*, a secondary instrument chip row would let users narrow further — "show me all violinists" or "all piano recordings". The data already supports this (`Credit.instrument` is populated by the parser). Worth adding once the basic tab layout has shipped and we have feedback. Implementation note: naive substring matching on `"violin"` will accidentally pick up `"viola"` and `"violoncello"`; either curate a small canonical-instrument list the parser normalises to, or live with imperfect matching initially.
+
+### Detail pages
 
 Detail pages reuse existing patterns where possible — Composer detail mirrors Artist detail (different listing inside), Work detail is shaped like Album detail (different relationships), and the OTHER VERSIONS section already used for cross-provider album linking is the natural home for "these recordings might be the same Work" suggestions when MBID matching fails. The only genuinely new page type is the **Work detail page**, which collapses multiple recordings of one composition into a single browseable entry.
 
@@ -447,6 +466,7 @@ Records of the substantive design questions that came up during drafting and the
 5. **Period / era field.** *Resolved:* out of scope. No canonical source (no standard tag, no MB field). Genre tags cover this for users who want it.
 6. **Promoting classical sub-views to main nav vs. internal tabs.** *Resolved:* single top-level "Classical" entry with internal tabs. Main nav approaching capacity; classical sub-views only useful to users with classical content. (See "Frontend integration approach".)
 7. **Whether to recommend Classical Extras (Picard plugin) to users.** *Resolved:* no blanket recommendation. Plugin produces wrong data when MB lacks Work info (the Vivaldi/Kennedy case), can destructively rewrite `ARTIST`, and configuration variance is enormous. We support its common output tag names as parser fallbacks but do not endorse it. (See parser policy in the Stage 4 doc when written.)
+8. **Tab layout inside the Classical view.** *Resolved:* four tabs — Composers / Works / Performers / Search — with role-filter chips inside Performers (*All / Conductors / Orchestras / Chamber groups / Choirs / Soloists*). Considered five tabs (separate Conductors and Ensembles), rejected as duplicative for symphonic repertoire and missing chamber/a-cappella music. Combined tab with chips reuses MA's existing filter pattern (album-type filter precedent). (See "Tab layout inside the Classical view".)
 
 ## Out of scope (future work)
 
