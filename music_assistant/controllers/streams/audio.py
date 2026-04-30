@@ -1499,10 +1499,8 @@ class StreamsAudio:
             discard_seconds = streamdetails.seek_position
             discard_leftover = 0
 
-        # Yield the first crossfade_buffer_size worth of audio immediately
-        # so playback starts right away. Only after that, start accumulating
-        # the crossfade holdback buffer for the end-of-track crossfade.
-        warmup_bytes = 0
+        # Yield directly until within the last crossfade_buffer_duration seconds,
+        # then switch to a sliding-window holdback for the end-of-track crossfade.
         total_chunks_received = 0
         async for chunk in self.get_queue_item_stream(
             queue_item,
@@ -1515,17 +1513,24 @@ class StreamsAudio:
                 chunk = chunk[discard_leftover:]  # noqa: PLW2901
                 discard_leftover = 0
 
-            if warmup_bytes < crossfade_buffer_size:
-                # warmup: yield directly, don't buffer
-                yield chunk
-                warmup_bytes += len(chunk)
-                bytes_written += len(chunk)
-                del chunk
-                continue
-
             buffer += chunk
             del chunk
-            # yield everything above the crossfade buffer
+
+            if not crossfade_buffer_size or not streamdetails.duration:
+                yield buffer
+                bytes_written += len(buffer)
+                buffer = b""
+                continue
+
+            position_in_track = (
+                discard_seconds + (bytes_written + len(buffer)) / pcm_format.pcm_sample_size
+            )
+            if streamdetails.duration - position_in_track > crossfade_buffer_duration:
+                yield buffer
+                bytes_written += len(buffer)
+                buffer = b""
+                continue
+
             while len(buffer) > crossfade_buffer_size:
                 yield buffer[: pcm_format.pcm_sample_size]
                 bytes_written += pcm_format.pcm_sample_size
@@ -1826,7 +1831,6 @@ class StreamsAudio:
 
             bytes_written = 0
             crossfade_buffer = b""
-            warmup_bytes = 0
             first_chunk_received = False
 
             async for chunk in self.get_queue_item_stream(
@@ -1863,26 +1867,14 @@ class StreamsAudio:
                     del chunk
                     continue
 
-                # Warmup: yield chunks directly until we have streamed
-                # crossfade_buffer_size worth of audio, so playback starts
-                # immediately instead of waiting for the full buffer to fill.
-                # Skip warmup when crossfade data from the previous track
-                # is pending, as we need a full buffer for the mix.
-                if warmup_bytes < crossfade_buffer_size and not last_fadeout_part:
-                    yield chunk
-                    warmup_bytes += len(chunk)
-                    bytes_written += len(chunk)
-                    del chunk
-                    continue
-
-                # smart fades enabled: accumulate chunks in crossfade buffer
                 crossfade_buffer += chunk
                 del chunk
-                if len(crossfade_buffer) < crossfade_buffer_size:
-                    continue
 
-                # handle crossfade of previous track and new track
+                # crossfade with previous track is pending: accumulate until we have
+                # crossfade_buffer_size worth of fade-in audio, then mix
                 if last_fadeout_part and last_streamdetails:
+                    if len(crossfade_buffer) < crossfade_buffer_size:
+                        continue
                     fadein_part = crossfade_buffer[:crossfade_buffer_size]
                     remaining_bytes = crossfade_buffer[crossfade_buffer_size:]
                     try:
@@ -1930,9 +1922,30 @@ class StreamsAudio:
                     last_fadeout_part = b""
                     last_streamdetails = None
                     crossfade_buffer = b""
-                    warmup_bytes = 0
 
-                # yield everything above the crossfade buffer size
+                # yield directly until within the last crossfade_buffer_duration seconds,
+                # then switch to a sliding-window holdback for the end-of-track crossfade
+                if not crossfade_buffer_size or not queue_track.streamdetails.duration:
+                    if crossfade_buffer:
+                        yield crossfade_buffer
+                        bytes_written += len(crossfade_buffer)
+                        crossfade_buffer = b""
+                    continue
+
+                position_in_track = (
+                    queue_track.streamdetails.seek_position
+                    + (bytes_written + len(crossfade_buffer)) / pcm_sample_size
+                )
+                if (
+                    queue_track.streamdetails.duration - position_in_track
+                    > crossfade_buffer_duration
+                ):
+                    if crossfade_buffer:
+                        yield crossfade_buffer
+                        bytes_written += len(crossfade_buffer)
+                        crossfade_buffer = b""
+                    continue
+
                 while len(crossfade_buffer) > crossfade_buffer_size:
                     yield crossfade_buffer[:pcm_sample_size]
                     bytes_written += pcm_sample_size
