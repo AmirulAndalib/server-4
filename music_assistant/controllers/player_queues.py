@@ -87,20 +87,23 @@ from music_assistant.models.player import Player, PlayerMedia
 
 _SortableT = TypeVar("_SortableT", bound=PlaylistPlayableItem)
 
-# Sentinel values accepted by `start_item` for podcasts that resolve to the
-# single most recent episode (highest `position`).
-_LATEST_EPISODE_SENTINELS = frozenset({"latest", "newest"})
+_LATEST_EPISODE_KEYWORDS = frozenset({"latest", "newest"})
+_START_ITEM_SUBSTRING_MIN_LEN = 3
 
 
 def _start_item_matches(start_item: str, item: Any) -> bool:
-    """Return True if `item` satisfies a `start_item` directive.
+    """
+    Return whether `item` satisfies a `start_item` directive.
 
-    Matching order:
-    1. exact match against `item.item_id` or `item.uri`
-    2. case-insensitive substring of `item.name`
+    :param start_item: Exact `item_id` / `uri`, or a case-insensitive
+        substring of the item's name (minimum
+        `_START_ITEM_SUBSTRING_MIN_LEN` characters).
+    :param item: Candidate media item.
     """
     if start_item in (getattr(item, "item_id", None), getattr(item, "uri", None)):
         return True
+    if len(start_item) < _START_ITEM_SUBSTRING_MIN_LEN:
+        return False
     name = getattr(item, "name", None)
     return bool(name and start_item.lower() in name.lower())
 
@@ -530,11 +533,9 @@ class PlayerQueuesController(CoreController):
         :param option: Which enqueue mode to use.
         :param radio_mode: Enable radio mode for the given item(s).
         :param start_item: Optional item to start the playlist or album from.
-            For podcasts a string value may also be a case-insensitive substring of
-            an episode name (first match wins), or the sentinel `"latest"` /
-            `"newest"` to enqueue only the single most recent episode. Note: an
-            episode literally named "Latest" cannot be targeted via substring;
-            use a more specific phrase or the episode URI.
+            For podcasts, a string may also be a substring of an episode name
+            (≥ 3 chars), or the keyword `"latest"` / `"newest"` to enqueue
+            only the most recent episode.
         :param username: The username of the user requesting the playback.
             Setting the username allows for overriding the logged-in user
             to account for playback history per user when the play_media is
@@ -2096,13 +2097,16 @@ class PlayerQueuesController(CoreController):
         episode: PodcastEpisode | str | None,
         userid: str | None = None,
     ) -> UniqueList[PodcastEpisode]:
-        """Return (next) episode(s) and resume point for given podcast.
+        """
+        Return the next episode(s) and resume point for the given podcast.
 
-        When `episode` is a string it can be:
-        - an exact `item_id` or `uri` of an episode in the podcast,
-        - a case-insensitive substring of an episode's name (first match wins),
-        - the sentinel `"latest"` / `"newest"` to return only the most recent
-          episode (highest `position`).
+        :param podcast: Podcast to enqueue, or `None` if `episode` is a
+            concrete `PodcastEpisode`.
+        :param episode: A `PodcastEpisode`, an exact `item_id` / `uri`, a
+            case-insensitive substring of an episode name (≥
+            `_START_ITEM_SUBSTRING_MIN_LEN` chars), or the keyword
+            `"latest"` / `"newest"` for the most recent episode.
+        :param userid: User whose resume position should be applied.
         """
         if podcast is None and isinstance(episode, str | NoneType):
             raise InvalidDataError("Either podcast or episode must be provided")
@@ -2129,8 +2133,8 @@ class PlayerQueuesController(CoreController):
             x async for x in self.mass.music.podcasts.episodes(podcast.item_id, podcast.provider)
         ]
         all_episodes.sort(key=lambda x: x.position)
-        # `latest` / `newest` sentinel: return only the most recent episode
-        if isinstance(episode, str) and episode.strip().lower() in _LATEST_EPISODE_SENTINELS:
+        # Require exact case and word match to minimise false positives.
+        if isinstance(episode, str) and episode in _LATEST_EPISODE_KEYWORDS:
             if not all_episodes:
                 raise InvalidDataError(
                     f"Unable to resolve episode to play for Podcast {podcast.name}"
