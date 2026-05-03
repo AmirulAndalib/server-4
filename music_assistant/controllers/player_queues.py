@@ -108,16 +108,13 @@ def _start_item_matches(start_item: str, item: Any) -> bool:
     return bool(name and start_item.lower() in name.lower())
 
 
-def _latest_episode_key(ep: PodcastEpisode) -> tuple[bool, Any, int]:
-    """
-    Sort key for picking the most recent podcast episode.
-
-    Prefers `metadata.release_date` when available; otherwise falls back to
-    `position`. Providers disagree on whether `position == 1` is the
-    oldest or newest episode, so release date is the more reliable signal.
-    """
+def _latest_episode_key(ep: PodcastEpisode) -> tuple[bool, float, int]:
+    """Sort key that orders podcast episodes from oldest to newest."""
+    # Prefer release_date over position: providers disagree on whether
+    # position == 1 is the oldest or newest episode.
     release_date = ep.metadata.release_date if ep.metadata else None
-    return (release_date is not None, release_date, ep.position)
+    timestamp = release_date.timestamp() if release_date is not None else 0.0
+    return (release_date is not None, timestamp, ep.position)
 
 
 if TYPE_CHECKING:
