@@ -96,8 +96,7 @@ def _start_item_matches(start_item: str, item: Any) -> bool:
     Return whether `item` satisfies a `start_item` directive.
 
     :param start_item: Exact `item_id` / `uri`, or a case-insensitive
-        substring of the item's name (minimum
-        `_START_ITEM_SUBSTRING_MIN_LEN` characters).
+        substring of the item's name.
     :param item: Candidate media item.
     """
     if start_item in (getattr(item, "item_id", None), getattr(item, "uri", None)):
@@ -2008,7 +2007,7 @@ class PlayerQueuesController(CoreController):
             ):
                 if not playlist_track.available:
                     continue
-                if start_item in (playlist_track.item_id, playlist_track.uri):
+                if start_item is not None and _start_item_matches(start_item, playlist_track):
                     start_item_found = True
                 if start_item is not None and not start_item_found:
                     continue
@@ -2027,7 +2026,7 @@ class PlayerQueuesController(CoreController):
         result = self._sort_tracks(result, cast("str", sort_by))
         if start_item is not None:
             for idx, track in enumerate(result):
-                if start_item in (track.item_id, track.uri):
+                if _start_item_matches(start_item, track):
                     return result[idx:]
             return []
         return result
