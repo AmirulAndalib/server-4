@@ -108,15 +108,6 @@ def _start_item_matches(start_item: str, item: Any) -> bool:
     return bool(name and start_item.lower() in name.lower())
 
 
-def _latest_episode_key(ep: PodcastEpisode) -> tuple[bool, float, int]:
-    """Sort key that orders podcast episodes from oldest to newest."""
-    # Prefer release_date over position: providers disagree on whether
-    # position == 1 is the oldest or newest episode.
-    release_date = ep.metadata.release_date if ep.metadata else None
-    timestamp = release_date.timestamp() if release_date is not None else 0.0
-    return (release_date is not None, timestamp, ep.position)
-
-
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
@@ -2141,14 +2132,14 @@ class PlayerQueuesController(CoreController):
         all_episodes = [
             x async for x in self.mass.music.podcasts.episodes(podcast.item_id, podcast.provider)
         ]
-        all_episodes.sort(key=lambda x: x.position)
         # Require exact case and word match to minimise false positives.
         if isinstance(episode, str) and episode in _LATEST_EPISODE_KEYWORDS:
             if not all_episodes:
                 raise InvalidDataError(
                     f"Unable to resolve episode to play for Podcast {podcast.name}"
                 )
-            latest = max(all_episodes, key=_latest_episode_key)
+            # Match the order shown in the UI (raw provider order).
+            latest = all_episodes[0]
             (
                 fully_played,
                 resume_position_ms,
@@ -2156,6 +2147,7 @@ class PlayerQueuesController(CoreController):
             latest.fully_played = fully_played
             latest.resume_position_ms = 0 if fully_played else resume_position_ms
             return UniqueList([latest])
+        all_episodes.sort(key=lambda x: x.position)
         # if a episode was provided, a user explicitly selected a episode to play
         # so we need to find the index of the episode in the list
         resolved_episode: PodcastEpisode | None = None
