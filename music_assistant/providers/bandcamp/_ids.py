@@ -1,4 +1,5 @@
-"""Composite artist ID utilities for the Bandcamp provider.
+"""
+Composite artist ID utilities for the Bandcamp provider.
 
 Bandcamp's data model treats labels as bands: an album published on a
 label's page (e.g. ``audiophob``) reports ``band_id`` = the label, while the
@@ -31,14 +32,8 @@ _SLUG_NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
 
 def slugify_performer(name: str) -> str:
-    """Reduce a performer name to a stable lowercase slug.
-
-    Two performer names compare equal as artists when their slugs match.
-    The transform is intentionally lossy — punctuation and case are
-    discarded — so minor variations like ``"&"`` vs ``"and"`` collapse
-    together. Bandcamp's per-album performer field is consistent within a
-    band page in practice, so within-band collisions are rare; cross-band
-    collisions are not a concern because ``band_id`` is part of the key.
+    """
+    Reduce a performer name to a stable lowercase slug.
 
     :param name: Raw performer name from the Bandcamp API.
     :returns: A slug containing only ``[a-z0-9-]`` with no leading or
@@ -49,7 +44,8 @@ def slugify_performer(name: str) -> str:
 
 
 def make_artist_id(band_id: int | str, performer: str | None = None) -> str:
-    """Build the artist ``item_id`` used on Music Assistant media items.
+    """
+    Build the artist ``item_id`` used on Music Assistant media items.
 
     :param band_id: The Bandcamp ``band_id`` (page owner).
     :param performer: Optional performer name. If provided and produces a
@@ -66,7 +62,8 @@ def make_artist_id(band_id: int | str, performer: str | None = None) -> str:
 
 
 def parse_artist_id(artist_id: str) -> tuple[int, str | None]:
-    """Split an artist ``item_id`` into ``(band_id, performer_slug)``.
+    """
+    Split an artist ``item_id`` into ``(band_id, performer_slug)``.
 
     :returns: A tuple where the second element is ``None`` for plain
         ``"{band_id}"`` IDs and a non-empty slug for synthetic ones.
