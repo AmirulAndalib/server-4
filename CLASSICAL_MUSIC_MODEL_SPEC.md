@@ -2,8 +2,6 @@
 
 **Status:** Draft for discussion
 **Scope:** Full design across all stages — model, schema, parsing, providers, enrichment, frontend.
-**Stage 1 (model changes) PR doc:** `CLASSICAL_MUSIC_STAGE_1_MODELS.md`
-**Community proposal:** `CLASSICAL_MUSIC_PROPOSAL.md`
 
 ## Background
 
