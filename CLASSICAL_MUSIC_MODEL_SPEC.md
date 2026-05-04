@@ -249,6 +249,8 @@ class Album(MediaItem):
 
 (Same convenience-property pattern as Track.)
 
+For compilation albums, `Album.composers` and `Album.conductors` may return long lists — a "100 Greatest Classical Hits" compilation could have 50+ distinct composers. This is intentional: the data is honest about what's there, and display logic in the frontend can collapse to a placeholder like "Various composers" above some threshold. This is *not* the same as the existing `Album.artists = [Various Artists]` pattern (which uses a single placeholder Artist entity); the new credit-based properties always carry the actual list.
+
 ## Field provenance
 
 A reference for the server-side parser/provider work in later stages. Each new model field has a clear source:
