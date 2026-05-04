@@ -317,11 +317,9 @@ A track containing only part of a Work (e.g. just *The Great Gate of Kiev* from 
 
 Real-world classical compilations sometimes contain multiple recordings of the *same* Work on a single album — e.g. an album with three different recordings of Beethoven's 5th, each contributing 4 movements (12 tracks total, all linked to the same Work). Without disambiguation, all 12 movements would collapse under one Work entry with confused movement numbering.
 
-**Default rule (heuristic, no new tag required):** within a single album, group movements that share **(Work + conductor + ensemble)** as one performance. Three Karajan/Berlin movements + four Bernstein/Vienna movements + four Solti/Chicago movements naturally split into three performance groups based on the differing credit pairs. Picard-tagged files that include proper conductor and ensemble credits get this grouping for free.
+**Rule (heuristic, no new tag required):** within a single album, group movements that share **(Work + conductor + ensemble)** as one performance. Three Karajan/Berlin movements + four Bernstein/Vienna movements + four Solti/Chicago movements naturally split into three performance groups based on the differing credit pairs. Picard-tagged files that include proper conductor and ensemble credits get this grouping for free.
 
-**The case the heuristic can't handle:** same conductor and same ensemble recorded the same Work twice on one album (e.g. a remastered re-release that contains both the 1962 and 1977 Karajan/Berlin recordings of Beethoven 5). Identical credits → heuristic collapses them into one apparent performance. Rare but real for tribute compilations and artist box-sets.
-
-**Escape hatch (manual):** when the user has the edge case, they can add Roon's `WORKID` tag to disambiguate — tracks sharing the same `WORKID` value belong to the same performance. Roon migrants get this for free; Picard users would need to add the tag manually with a tag editor (no Picard plugin writes it). The parser reads `WORKID` when present and uses it to override the heuristic. See open questions for whether to formalise this as a model field (`Track.performance_id`).
+This heuristic is sufficient for every concrete example we've identified. If a real-world album turns up where it fails (a hypothetical case would be the same conductor + same ensemble recording the same Work twice on one album, but no verified example), we can revisit. See open questions for a sketch of the deferred field.
 
 ### Scale considerations
 
@@ -518,7 +516,7 @@ Records of the substantive design questions that came up during drafting and the
 These are deferred to follow-up additions when concrete demand arises. All are additive and non-breaking when added.
 
 1. **`Track.section` (Roon `SECTION` equivalent).** Roon supports a three-level hierarchy `WORK → SECTION → PART` for operas (e.g. "Le nozze di Figaro" → "Act 1" → "Cinque... dieci..."). Our model handles two levels (parent Work + movement on Track). For Roon-style opera tagging, an additive `Track.section: str | None` field would capture the intermediate level cheaply. Alternative: model Acts as proper movement-Works via parent_work nesting (more faithful to MB but creates more Work rows). Defer until a concrete consumer needs it.
-2. **`Track.performance_id` (Roon `WORKID` equivalent).** For disambiguating multiple recordings of the same Work on a single album when the heuristic (Work + conductor + ensemble grouping) can't tell them apart. Read from the `WORKID` tag if present. Most users won't need this; the heuristic covers ~95% of cases. Defer until users hit the limitation.
+2. **`Track.performance_id` (Roon `WORKID` equivalent).** Would disambiguate multiple recordings of the same Work on a single album when the heuristic (Work + conductor + ensemble grouping) can't tell them apart — e.g. same conductor + same ensemble recording the same Work twice on one album. **No verified real-world example identified** of this case; deferred until a user reports an album where the heuristic fails. If added, the parser would read Roon's `WORKID` tag (no Picard equivalent — users would need to add it manually with a tag editor).
 
 ## Out of scope (future work)
 
