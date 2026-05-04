@@ -724,7 +724,7 @@ These are deferred to follow-up additions when concrete demand arises. All are a
 
 ### Community discussions
 
-- Music Assistant Discord — "Better Classical Music Support" thread: *[Discord URL — to be added]*
+- Music Assistant Discord — "Better Classical Music Support" thread
 - Roon Classical Music Initiative (CMI) and Three Line Solution (TLS) — design discussion: https://community.roonlabs.com/t/one-suggestion-for-organising-a-classical-music-collection-in-roon/243207/10
 - Classical Extras Picard plugin — discussion thread: https://community.metabrainz.org/t/classical-extras-2-0/394627
 
