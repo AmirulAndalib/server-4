@@ -271,6 +271,21 @@ A reference for the server-side parser/provider work in later stages. Each new m
 
 Tags with no MusicBrainz equivalent (e.g. some `TXXX` fields written by certain taggers) and MB fields with no tag equivalent (conductor MBID, performer MBIDs, arrangement relationships) are accepted gracefully — the parser fills what it can; the enrichment provider fills the rest.
 
+### Tag fallbacks for non-Picard taggers
+
+Some users tag with tools other than Picard — most notably Roon (well-regarded for classical handling) and the Classical Extras Picard plugin. These tools write to different tag names than the MusicBrainz Picard standard mapping. To ensure those libraries work without retagging, the parser reads a small set of fallback tag names per field. Implementation note: **code that reads non-standard tag names should carry an inline comment identifying the source** (e.g. `# Roon convention` or `# Classical Extras plugin`) so future maintainers know where the tag name originates and can find the relevant external documentation.
+
+| Field | Standard | Roon | Classical Extras | Notes |
+|---|---|---|---|---|
+| Movement name | `MOVEMENTNAME` (`MVNM`) | `PART` | `MOVEMENT` | Picard's iTunes-standard `MOVEMENTNAME` is canonical; Roon and Classical Extras both diverge. |
+| Work | `WORK` (`TIT1`) | `WORK` | `WORK` / `groupheading` / `top_work` | Standard tag matches across all three. |
+| Section (intermediate level) | — | `SECTION` | — | Roon-only; covers e.g. opera Act 1. See open question. |
+| Ensemble credit | `PERFORMER="Name (orchestra)"` etc. | `ENSEMBLE` (dedicated tag) | `soloists` / `involved people` | Roon writes a dedicated tag — cleaner input, no parens parsing. |
+| Soloist credit | `PERFORMER:instrument="Name"` | `SOLOIST` (dedicated tag) | `soloists` | Same situation as ensemble. |
+| Generic credit with role | `TMCL` (ID3) / `PERFORMER` parens (Vorbis) | `PERSONNEL="Name - Role"` | `soloists` / `involved people` | Roon's `PERSONNEL` parses on ` - ` with surrounding spaces (avoids hitting hyphenated names like "Lloyd-Webber"). |
+| Orchestra | (parens-keyword detection in `PERFORMER`) | `PERSONNEL="Name - Orchestra"` | (parens or specific tag) | **Roon does not support an `ORCHESTRA` tag at all** — orchestras come through `PERSONNEL` only. Picard-tagged files use the parens-keyword detection rules documented earlier. |
+| Classical-flag | — | — | `is_classical` | Classical Extras only. |
+
 ## Matching policy
 
 How instances of these entities are matched and grouped at runtime. This belongs in the spec because it constrains what the data shape needs to support; the actual matching code lives in the server.
@@ -297,6 +312,16 @@ Arrangements/transcriptions are deliberately **separate** Works in MusicBrainz, 
 ### Partial recordings
 
 A track containing only part of a Work (e.g. just *The Great Gate of Kiev* from *Pictures at an Exhibition*) is modelled in MusicBrainz as a Recording-Work relationship with a "partial" attribute. See open questions for whether to surface this as a Track flag.
+
+### Performance grouping within an album
+
+Real-world classical compilations sometimes contain multiple recordings of the *same* Work on a single album — e.g. an album with three different recordings of Beethoven's 5th, each contributing 4 movements (12 tracks total, all linked to the same Work). Without disambiguation, all 12 movements would collapse under one Work entry with confused movement numbering.
+
+**Default rule (heuristic, no new tag required):** within a single album, group movements that share **(Work + conductor + ensemble)** as one performance. Three Karajan/Berlin movements + four Bernstein/Vienna movements + four Solti/Chicago movements naturally split into three performance groups based on the differing credit pairs. Picard-tagged files that include proper conductor and ensemble credits get this grouping for free.
+
+**The case the heuristic can't handle:** same conductor and same ensemble recorded the same Work twice on one album (e.g. a remastered re-release that contains both the 1962 and 1977 Karajan/Berlin recordings of Beethoven 5). Identical credits → heuristic collapses them into one apparent performance. Rare but real for tribute compilations and artist box-sets.
+
+**Escape hatch (manual):** when the user has the edge case, they can add Roon's `WORKID` tag to disambiguate — tracks sharing the same `WORKID` value belong to the same performance. Roon migrants get this for free; Picard users would need to add the tag manually with a tag editor (no Picard plugin writes it). The parser reads `WORKID` when present and uses it to override the heuristic. See open questions for whether to formalise this as a model field (`Track.performance_id`).
 
 ### Scale considerations
 
@@ -486,6 +511,14 @@ Records of the substantive design questions that came up during drafting and the
 10. **Where Classical search lives.** *Resolved:* in the existing global search bar via a *Classical* master chip, not as a tab inside the Classical view. A Search tab inside Classical would duplicate the same UI with the same data behind a different entry point. Auto-activate the Classical chip when search is invoked from the Classical view to give context-aware default scope. (See "Search integration".)
 11. **Staging Classical search across two PRs.** *Resolved:* Stage 8 ships the basic Classical chip returning a flat list of up to 50 mixed results (single-term substring match, no nested chips). Stage 9 adds the nested chip hierarchy (Composers / Works / Performers as second level; performer-role chips as third level inside Performers). Splitting keeps PR review tractable and gives an early demoable milestone. (See stages table.)
 12. **Search backend upgrade (FTS5, multi-term token-AND, ranked results).** *Resolved:* out of scope for the classical project entirely. These would be MA-wide infrastructure changes affecting every entity type's search behaviour and need their own RFC. Classical search uses the current substring-match backend with extended fields. When MA-wide search is later upgraded as its own initiative, classical inherits the improvement.
+13. **Support for Roon and Classical Extras tag conventions.** *Resolved:* the parser reads a small set of well-known fallback tag names from each (notably `PART`, `ENSEMBLE`, `SOLOIST`, `PERSONNEL`, `SECTION` from Roon; `groupheading`, `top_work`, `is_classical`, `movement` from Classical Extras), with inline code comments identifying the source. We don't *recommend* either tagger to users (each has its own failure modes), but Picard remains the canonical reference; alternative tag names are read as fallbacks so users coming from those tools work without retagging.
+
+## Open questions
+
+These are deferred to follow-up additions when concrete demand arises. All are additive and non-breaking when added.
+
+1. **`Track.section` (Roon `SECTION` equivalent).** Roon supports a three-level hierarchy `WORK → SECTION → PART` for operas (e.g. "Le nozze di Figaro" → "Act 1" → "Cinque... dieci..."). Our model handles two levels (parent Work + movement on Track). For Roon-style opera tagging, an additive `Track.section: str | None` field would capture the intermediate level cheaply. Alternative: model Acts as proper movement-Works via parent_work nesting (more faithful to MB but creates more Work rows). Defer until a concrete consumer needs it.
+2. **`Track.performance_id` (Roon `WORKID` equivalent).** For disambiguating multiple recordings of the same Work on a single album when the heuristic (Work + conductor + ensemble grouping) can't tell them apart. Read from the `WORKID` tag if present. Most users won't need this; the heuristic covers ~95% of cases. Defer until users hit the limitation.
 
 ## Out of scope (future work)
 
