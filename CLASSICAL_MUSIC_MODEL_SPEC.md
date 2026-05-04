@@ -707,6 +707,31 @@ These are deferred to follow-up additions when concrete demand arises. All are a
 1. **`Track.section` (Roon `SECTION` equivalent).** Roon supports a three-level hierarchy `WORK → SECTION → PART` for operas (e.g. "Le nozze di Figaro" → "Act 1" → "Cinque... dieci..."). Our model handles two levels (parent Work + movement on Track). For Roon-style opera tagging, an additive `Track.section: str | None` field would capture the intermediate level cheaply. Alternative: model Acts as proper movement-Works via parent_work nesting (more faithful to MB but creates more Work rows). Defer until a concrete consumer needs it.
 2. **`Track.performance_id` (Roon `WORKID` equivalent).** Would disambiguate multiple recordings of the same Work on a single album when the heuristic (Work + conductor + ensemble grouping) can't tell them apart — e.g. same conductor + same ensemble recording the same Work twice on one album. **No verified real-world example identified** of this case; deferred until a user reports an album where the heuristic fails. If added, the parser would read Roon's `WORKID` tag (no Picard equivalent — users would need to add it manually with a tag editor).
 
+## References
+
+### Tag standards and canonical mappings
+
+- MusicBrainz Picard tag mapping — canonical cross-format mapping (Vorbis / ID3 / MP4 / APEv2): https://picard-docs.musicbrainz.org/en/appendices/tag_mapping.html
+- MusicBrainz Work entity — Work, catalog numbers, work types, arrangement-of relationships: https://musicbrainz.org/doc/Work
+- MusicBrainz Recording entity — Recording matching and Recording-Artist relationships used in Stage 6 enrichment and decision #20: https://musicbrainz.org/doc/Recording
+- ID3v2.4 frame specification — TCOM, TPE3, TMCL, TIT1, TSOC, MVNM, MVIN: https://id3.org/id3v2.4.0-frames
+- Vorbis comment specification — multi-valued PERFORMER convention with parens-suffix instrument/role: https://xiph.org/vorbis/doc/v-comment.html
+- iTunes 12.5 movement tags — Apple-introduced MVNM / MVIN / ©mvn / ©mvi / ©mvc: https://www.macworld.com/article/228807/how-to-better-organize-classical-music-in-itunes.html
+
+### Third-party tagging conventions and tools
+
+- Classical Extras Picard plugin — source: https://github.com/MetaTunes/picard-plugins/tree/metabrainz/2.0/plugins/classical_extras
+
+### Community discussions
+
+- Music Assistant Discord — "Better Classical Music Support" thread: *[Discord URL — to be added]*
+- Roon Classical Music Initiative (CMI) and Three Line Solution (TLS) — design discussion: https://community.roonlabs.com/t/one-suggestion-for-organising-a-classical-music-collection-in-roon/243207/10
+- Classical Extras Picard plugin — discussion thread: https://community.metabrainz.org/t/classical-extras-2-0/394627
+
+### UX precedent
+
+- Apple Music Classical (launch announcement) — composer / work / performer browse structure, recording-year display, search across opus numbers and performers: https://www.apple.com/newsroom/2023/03/apple-music-classical-is-here/
+
 ## Out of scope (future work)
 
 - Period / era field (no canonical source; derive from genres or composer dates if needed).
