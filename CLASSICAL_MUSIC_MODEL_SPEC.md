@@ -485,11 +485,11 @@ The Classical view is a **parallel lens, not a replacement**. The standard Artis
 
 These sketches are **structural, not visual** — they exist to anchor the navigation discussion and make element placement concrete for review. Final visual design (typography, spacing, density, mobile layout, light/dark theming) is out of scope here and will be done in the frontend PR (Stage 7).
 
-what you described maps cleanly: Composers → Composer detail → Work detail; Performers (Conductors chip) → Conductor detail → Work detail. Same destination from different starting points.
+The destination is always the same Work detail page regardless of how the user got there — clicking a Work from the Works tab, Composer detail, Conductor detail, or search all open the same page. The frontend reuses the Works-list component with different filter parameters; only the surrounding context (composer / performer header) differs.
 
-What each view looks like (rough sketches)
-Composers tab — index of all composers in the library:
+**Composers tab** — index of all composers in the library:
 
+```
 ┌─ Classical ── [Composers] Works  Performers ────────┐
 │  Sort: name ▼      Search: [               ]       │
 │                                                     │
@@ -499,8 +499,11 @@ Composers tab — index of all composers in the library:
 │  Bach    Beethoven Mozart  Chopin  Pärt           │
 │  212 wks 157 wks  89 wks  43 wks  62 wks          │
 └─────────────────────────────────────────────────────┘
-Composer detail — the composer's works listed:
+```
 
+**Composer detail** — the composer's works listed:
+
+```
 ┌─ Classical / Composers / Bach ──────────────────────┐
 │  ┌────┐  Johann Sebastian Bach                      │
 │  │JSB │  1685 – 1750                                │
@@ -516,8 +519,11 @@ Composer detail — the composer's works listed:
 │  Mass in B minor              BWV 232    7 rec.    │
 │  ...                                                │
 └─────────────────────────────────────────────────────┘
-Works tab — all works across all composers, browseable directly:
+```
 
+**Works tab** — all works across all composers, browseable directly:
+
+```
 ┌─ Classical ── Composers [Works] Performers ────────┐
 │  Sort: composer ▼  Type: [All ▼]  [           ]    │
 │                                                     │
@@ -530,8 +536,11 @@ Works tab — all works across all composers, browseable directly:
 │  Pärt        Spiegel im Spiegel                    │
 │  ...                                                │
 └─────────────────────────────────────────────────────┘
-Work detail — multiple recordings of one composition (this is the new page type):
+```
 
+**Work detail** — multiple recordings of one composition (the genuinely new page type):
+
+```
 ┌─ Classical / Works / Brandenburg Concerto No. 5 ────┐
 │                                                     │
 │  Brandenburg Concerto No. 5 in D major              │
@@ -556,10 +565,13 @@ Work detail — multiple recordings of one composition (this is the new page typ
 │  RELATED WORKS                                      │
 │  (none — not an arrangement of another work)        │
 └─────────────────────────────────────────────────────┘
+```
+
 Click ▶ on the recording header → queue all movements gapless. Click an individual movement → play that one.
 
-Performers tab with the Conductors chip selected:
+**Performers tab** with the Conductors chip selected:
 
+```
 ┌─ Classical ── Composers Works [Performers] ────────┐
 │  [All] [Conductors] [Orchestras] [Chamber]         │
 │  [Choirs] [Soloists] [Other]                       │
@@ -571,8 +583,11 @@ Performers tab with the Conductors chip selected:
 │  └─────┘ └─────┘ └─────┘ └─────┘ └─────┘         │
 │  Karajan Bernstein Solti  Davis   Gardiner       │
 └─────────────────────────────────────────────────────┘
-Conductor detail — works performed by this conductor:
+```
 
+**Conductor detail** — works performed by this conductor:
+
+```
 ┌─ Classical / Performers / Karajan ──────────────────┐
 │  ┌────┐  Herbert von Karajan                        │
 │  │ HvK│  1908 – 1989 · Conductor                    │
@@ -590,56 +605,14 @@ Conductor detail — works performed by this conductor:
 │  │ BPO │ │ VPO │                                   │
 │  └─────┘ └─────┘                                   │
 └─────────────────────────────────────────────────────┘
-Answering your question
-"is the Works view from a composer or conductor the same as the Works tab, just filtered?"
+```
 
-Effectively yes. The Composer detail page is conceptually "the Works tab filtered to this composer, with a composer header at the top." Same goes for the Conductor detail — "Works tab filtered to works conducted by this person." Implementation-wise the frontend can reuse the same Works-list component with different filter parameters, just with the surrounding context (composer/conductor header) differing.
+#### Sort defaults per view
 
-The destination is always the same: clicking a Work from anywhere — Works tab, Composer detail, Conductor detail — opens the same Work detail page with all its recordings grouped underneath.
-
-Sort options
-Reasonable defaults per view:
-
-Works tab: composer name (default), work title, year of composition, recording count.
-Composer detail: catalog number (default — Op. / BWV / K. order is canonical), work title, work type, recording count. Filter by work type useful here too.
-Conductor detail: composer (default — group all Beethoven together, then all Brahms), work title, recording count.
-Are there sort options you'd want that aren't there? The "by performer" sort you mentioned is interesting — could be useful inside the Work detail page to order recordings by conductor name or orchestra name.
-
-So looking at the conductor detail. If a user clicks on the first row does it expand to just show the 8 recordings? (version I guess is the word I poorly used!) And then you click again to expand a recording to show the movements? Or should we actually go from conductor to work detail with it filtered as we just discussed?
-
-Good question — and I think Option B is the cleaner answer, but with a contextual twist.
-
-Why Option B (navigate to Work detail) is cleaner
-Inline-expand to three levels (works → recordings → movements) gets visually heavy fast. You'd have multiple expand/collapse states to track on one page, and the same Work would render slightly differently here than on its own Work detail page — meaning two places to maintain the recording-with-movements display logic.
-
-Navigating to the Work detail page keeps that page as the single canonical home for "everything about this work" — which is also where users land from Composer detail, Works tab, search, and the OTHER VERSIONS section. Same destination from every direction. Easier to maintain, more predictable for users.
-
-The contextual twist
-Without anything else, navigating from Karajan → Beethoven 5 lands on a Work detail page showing all recordings of Beethoven 5 (Karajan, Bernstein, Solti, etc.) — and the user has to scan to find the eight they came for. That's annoying.
-
-The fix: Work detail page knows its arrival context and applies an implicit filter. When you arrive from a Conductor detail page, the recordings list defaults to that conductor's recordings only, with an obvious escape hatch to see all:
-
-┌─ Classical / Performers / Karajan / Beethoven 5 ────┐
-│                                                     │
-│  Symphony No. 5 in C minor, Op. 67                  │
-│  Ludwig van Beethoven · Op. 67 · Symphony           │
-│                                                     │
-│  Showing 8 recordings by Karajan        [Show all] │
-│                                                     │
-│  ▶ Karajan / Berlin Philharmonic (1962)             │
-│      I.   Allegro con brio              7:38       │
-│      II.  Andante con moto             10:42       │
-│      ...                                            │
-│                                                     │
-│  ▶ Karajan / Berlin Philharmonic (1977)             │
-│      ...                                            │
-│                                                     │
-│  ▶ Karajan / Berlin Philharmonic (1984)             │
-│      ...                                            │
-└─────────────────────────────────────────────────────┘
-Click Show all → the page expands to include Bernstein's, Solti's, etc. recordings of the same work. Best of both: came-here-to-see-Karajan intent honoured by default, full picture available with one click.
-
-The Composer detail flow doesn't need this filter — every recording on a Bach work IS by Bach, so there's nothing to narrow.
+- **Works tab:** composer name (default); secondary options for work title, year of composition, recording count.
+- **Composer detail:** catalog number (default — Op. / BWV / K. order is canonical); options for work title, work type, recording count. The work-type filter affordance lives here too.
+- **Conductor / Soloist / Orchestra detail:** composer name (default — groups all Beethoven together, then all Brahms); options for work title, recording count.
+- **Work detail:** chronological by recording year (default); options to sort recordings by conductor or orchestra name.
 
 ### Search integration
 
@@ -670,6 +643,31 @@ Every "list of works" view (Composer detail, Conductor detail, Soloist detail, O
 - **Composer detail → Work detail:** no filter applied — every recording on the page is by that composer anyway. Show all recordings.
 - **Conductor / Soloist / Orchestra / Ensemble / Choir detail → Work detail:** filter the recordings list to those involving that performer. Default to filtered view; show a *"Showing N recordings by [performer] — Show all"* affordance to expand to all recordings of the work.
 - **Works tab / Search / OTHER VERSIONS → Work detail:** no filter applied.
+
+Example — arriving at Beethoven 5 from Karajan's Conductor detail page:
+
+```
+┌─ Classical / Performers / Karajan / Beethoven 5 ────┐
+│                                                     │
+│  Symphony No. 5 in C minor, Op. 67                  │
+│  Ludwig van Beethoven · Op. 67 · Symphony           │
+│                                                     │
+│  Showing 8 recordings by Karajan        [Show all] │
+│                                                     │
+│  ▶ Karajan / Berlin Philharmonic (1962)             │
+│      I.   Allegro con brio              7:38       │
+│      II.  Andante con moto             10:42       │
+│      ...                                            │
+│                                                     │
+│  ▶ Karajan / Berlin Philharmonic (1977)             │
+│      ...                                            │
+│                                                     │
+│  ▶ Karajan / Berlin Philharmonic (1984)             │
+│      ...                                            │
+└─────────────────────────────────────────────────────┘
+```
+
+Clicking *Show all* expands the page to include every recording of the same work (Bernstein, Solti, etc.). Best of both: came-here-to-see-Karajan intent honoured by default, full picture available with one click.
 
 The implementation parameterises the Work detail query with an optional `filter_by_artist_id` (or similar). Server-side it's a credit-join filter on the recordings; frontend just renders the filtered list with the escape hatch.
 
