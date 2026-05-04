@@ -495,6 +495,20 @@ When the Performers tab (or Stage 9's Performers sub-chip in global search) is n
 
 Detail pages reuse existing patterns where possible — Composer detail mirrors Artist detail (different listing inside), Work detail is shaped like Album detail (different relationships), and the OTHER VERSIONS section already used for cross-provider album linking is the natural home for "these recordings might be the same Work" suggestions when MBID matching fails. The only genuinely new page type is the **Work detail page**, which collapses multiple recordings of one composition into a single browseable entry.
 
+### Navigation pattern: contextual filter on Work detail
+
+Every "list of works" view (Composer detail, Conductor detail, Soloist detail, Orchestra detail, Works tab, Search) navigates to the **same Work detail page** when the user clicks a work. To make this work cleanly when arrival happens from a performer-filtered context, the Work detail page applies a **contextual recording filter** based on the path that got you there:
+
+- **Composer detail → Work detail:** no filter applied — every recording on the page is by that composer anyway. Show all recordings.
+- **Conductor / Soloist / Orchestra / Ensemble / Choir detail → Work detail:** filter the recordings list to those involving that performer. Default to filtered view; show a *"Showing N recordings by [performer] — Show all"* affordance to expand to all recordings of the work.
+- **Works tab / Search / OTHER VERSIONS → Work detail:** no filter applied.
+
+The implementation parameterises the Work detail query with an optional `filter_by_artist_id` (or similar). Server-side it's a credit-join filter on the recordings; frontend just renders the filtered list with the escape hatch.
+
+### Recordings link back to source albums
+
+Each recording on the Work detail page is rendered with a link to its source album (the album it was originally released on). This preserves the path from "browsing classical → found a recording" to "playing the original album as released" — covering the use case where a user discovers a recording via the Classical view and wants to know which album in their library it came from.
+
 ## Decisions log
 
 Records of the substantive design questions that came up during drafting and their resolutions, so reviewers don't have to re-litigate them.
@@ -512,6 +526,8 @@ Records of the substantive design questions that came up during drafting and the
 11. **Staging Classical search across two PRs.** *Resolved:* Stage 8 ships the basic Classical chip returning a flat list of up to 50 mixed results (single-term substring match, no nested chips). Stage 9 adds the nested chip hierarchy (Composers / Works / Performers as second level; performer-role chips as third level inside Performers). Splitting keeps PR review tractable and gives an early demoable milestone. (See stages table.)
 12. **Search backend upgrade (FTS5, multi-term token-AND, ranked results).** *Resolved:* out of scope for the classical project entirely. These would be MA-wide infrastructure changes affecting every entity type's search behaviour and need their own RFC. Classical search uses the current substring-match backend with extended fields. When MA-wide search is later upgraded as its own initiative, classical inherits the improvement.
 13. **Support for Roon and Classical Extras tag conventions.** *Resolved:* the parser reads a small set of well-known fallback tag names from each (notably `PART`, `ENSEMBLE`, `SOLOIST`, `PERSONNEL`, `SECTION` from Roon; `groupheading`, `top_work`, `is_classical`, `movement` from Classical Extras), with inline code comments identifying the source. We don't *recommend* either tagger to users (each has its own failure modes), but Picard remains the canonical reference; alternative tag names are read as fallbacks so users coming from those tools work without retagging.
+14. **Classical as an album-type filter.** *Rejected.* The existing album-type filter (Live / Soundtrack / Compilation / etc.) draws from MusicBrainz's release-type taxonomy and describes the production context of a release. Classical is a genre/classification that cuts *across* release types — a classical album can also be Live, Compilation, or Soundtrack. Adding "Classical" alongside Live/Soundtrack would be a category error and create false either/or choices. Users who want to filter the regular Albums view to classical-only can use the genre filter (if their albums are tagged with classical genres) or browse via the Classical view. We don't put "Rock" or "Jazz" in the album-type filter for the same reason.
+15. **Navigation: contextual filter on Work detail.** *Resolved.* All "list of works" views navigate to the same Work detail page. When arrival happens from a performer-filtered context (Conductor / Soloist / Orchestra / Ensemble / Choir detail), the Work detail page applies an implicit recording filter to that performer with a "Show all" escape hatch. From Composer detail, Works tab, Search, or OTHER VERSIONS, no filter is applied. (See "Navigation pattern" under Frontend integration approach.)
 
 ## Open questions
 
