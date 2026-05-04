@@ -457,6 +457,10 @@ The expectation is that the server PR ships first (populating the new fields), t
 
 This spec only defines the data shape, not the UI. But two frontend decisions are worth recording here because reviewers will ask.
 
+### Coexistence with standard browse views
+
+The Classical view is a **parallel lens, not a replacement**. The standard Artists / Albums / Tracks views remain unchanged and continue to be the home for album-as-curated-unit playback — compilation box sets, recital discs, mixed-composer programmes, and any release where the album itself is the meaningful object. Classical-aware users get the additional structure via the Classical view; everyone else sees no change. The two coexist on the same data with no duplication of storage.
+
 ### Where it lives in the navigation
 
 **Decided: a single top-level "Classical" entry with internal tabs.** Sub-navigation lives *inside* the Classical view, not as separate top-level menu items.
@@ -490,6 +494,10 @@ When the user invokes search from inside the Classical view, the Classical chip 
 ### Future polish: instrument filter
 
 When the Performers tab (or Stage 9's Performers sub-chip in global search) is narrowed to *Soloists*, a further instrument-level filter would let users narrow to "all violinists" or "all piano recordings". The data already supports this (`Credit.instrument` is populated by the parser). Worth adding once the basic structure has shipped and we have feedback. Implementation note: naive substring matching on `"violin"` will accidentally pick up `"viola"` and `"violoncello"`; either curate a small canonical-instrument list the parser normalises to, or live with imperfect matching initially.
+
+### Future polish: work-type filter on the Works tab
+
+The Composer detail page already exposes a *Filter by type* affordance (Symphony / Concerto / Sonata / Opera / etc.) sourced from `Work.work_type`. Promoting the same filter to the top-level Works tab would let users browse "all symphonies in my library across all composers" — a natural classical browsing pattern. The data already supports this; only the frontend filter UI needs adding. Defer until the basic Works tab has shipped and we have feedback on whether the cross-composer view is wanted.
 
 ### Detail pages
 
