@@ -67,6 +67,8 @@ from music_assistant.constants import (
     DB_TABLE_SETTINGS,
     DB_TABLE_TRACK_ARTISTS,
     DB_TABLE_TRACKS,
+    DB_TABLE_WORK_ARRANGEMENTS,
+    DB_TABLE_WORKS,
     DEFAULT_GENRE_MAPPING,
     LOUDNESS_MEASUREMENT_MIN_LUFS,
     PROVIDERS_WITH_SHAREABLE_URLS,
@@ -109,7 +111,7 @@ CONF_RESET_DB = "reset_db"
 DEFAULT_SYNC_INTERVAL = 12 * 60  # default sync interval in minutes
 CONF_SYNC_INTERVAL = "sync_interval"
 CONF_DELETED_PROVIDERS = "deleted_providers"
-DB_SCHEMA_VERSION: Final[int] = 40
+DB_SCHEMA_VERSION: Final[int] = 41
 
 CACHE_CATEGORY_SEARCH_RESULTS: Final[int] = 10
 DATABASE_CLEANUP_TASK_ID: Final[str] = "music_database_cleanup"
@@ -2677,6 +2679,95 @@ class MusicController(CoreController):
                 if "duplicate column" not in str(err):
                     raise
 
+        if prev_version <= 40:
+            # Stage 2 of classical music support: add works table, work_arrangements
+            # junction, work/movement columns on tracks, and role/instrument/position
+            # columns on track_artists / album_artists with backfill to 'main_artist'.
+            await self._database.execute(
+                f"""CREATE TABLE IF NOT EXISTS {DB_TABLE_WORKS}(
+                [item_id] INTEGER PRIMARY KEY AUTOINCREMENT,
+                [name] TEXT NOT NULL,
+                [sort_name] TEXT NOT NULL,
+                [version] TEXT,
+                [favorite] BOOLEAN NOT NULL DEFAULT 0,
+                [composers] json NOT NULL DEFAULT '[]',
+                [catalog_numbers] json NOT NULL DEFAULT '[]',
+                [work_type] TEXT,
+                [parent_work] json,
+                [metadata] json NOT NULL,
+                [external_ids] json NOT NULL,
+                [timestamp_added] INTEGER DEFAULT (cast(strftime('%s','now') as int)),
+                [timestamp_modified] INTEGER NOT NULL DEFAULT 0,
+                [search_name] TEXT NOT NULL,
+                [search_sort_name] TEXT NOT NULL
+                );"""
+            )
+            await self._database.execute(
+                f"""CREATE TABLE IF NOT EXISTS {DB_TABLE_WORK_ARRANGEMENTS}(
+                [work_id] INTEGER NOT NULL,
+                [source_work_id] INTEGER NOT NULL,
+                FOREIGN KEY([work_id]) REFERENCES [{DB_TABLE_WORKS}]([item_id]),
+                FOREIGN KEY([source_work_id]) REFERENCES [{DB_TABLE_WORKS}]([item_id]),
+                UNIQUE(work_id, source_work_id)
+                );"""
+            )
+            # add work/movement columns to tracks (FK to works is allowed by the
+            # SQLite ALTER TABLE syntax but not enforced at runtime — controller
+            # layer will guard integrity in Stage 3)
+            for column_sql in (
+                f"ALTER TABLE {DB_TABLE_TRACKS} ADD COLUMN [work_id] "
+                f"INTEGER REFERENCES {DB_TABLE_WORKS}(item_id)",
+                f"ALTER TABLE {DB_TABLE_TRACKS} ADD COLUMN [movement_number] INTEGER",
+                f"ALTER TABLE {DB_TABLE_TRACKS} ADD COLUMN [movement_total] INTEGER",
+                f"ALTER TABLE {DB_TABLE_TRACKS} ADD COLUMN [movement_name] TEXT",
+            ):
+                try:
+                    await self._database.execute(column_sql)
+                except Exception as err:
+                    if "duplicate column" not in str(err):
+                        raise
+            # recreate track_artists / album_artists with role/instrument/position columns.
+            # SQLite cannot drop or modify a column-level UNIQUE constraint via ALTER,
+            # so use the canonical 12-step recreation pattern. The DEFAULT 'main_artist'
+            # backfills every existing junction row (each was effectively a headline credit).
+            await self._database.execute("PRAGMA foreign_keys=OFF")
+            for table, owner_col in (
+                (DB_TABLE_TRACK_ARTISTS, "track_id"),
+                (DB_TABLE_ALBUM_ARTISTS, "album_id"),
+            ):
+                ref_table = DB_TABLE_TRACKS if owner_col == "track_id" else DB_TABLE_ALBUMS
+                await self._database.execute(
+                    f"""CREATE TABLE {table}_new(
+                    [{owner_col}] INTEGER NOT NULL,
+                    [artist_id] INTEGER NOT NULL,
+                    [role] TEXT NOT NULL DEFAULT 'main_artist',
+                    [instrument] TEXT,
+                    [position] INTEGER NOT NULL DEFAULT 0,
+                    FOREIGN KEY([{owner_col}]) REFERENCES [{ref_table}]([item_id]),
+                    FOREIGN KEY([artist_id]) REFERENCES [{DB_TABLE_ARTISTS}]([item_id])
+                    )"""
+                )
+                await self._database.execute(
+                    f"INSERT INTO {table}_new"
+                    f"({owner_col}, artist_id, role, instrument, position) "
+                    f"SELECT {owner_col}, artist_id, 'main_artist', NULL, 0 "
+                    f"FROM {table}"
+                )
+                # drop old indexes (they don't survive DROP TABLE) — recreated by
+                # __create_database_indexes after migration finishes
+                for old_idx in (
+                    f"{table}_{owner_col}_idx",
+                    f"{table}_artist_id_idx",
+                ):
+                    await self._database.execute(f"DROP INDEX IF EXISTS {old_idx}")
+                await self._database.execute(f"DROP TABLE {table}")
+                await self._database.execute(f"ALTER TABLE {table}_new RENAME TO {table}")
+                await self._database.execute(
+                    f"CREATE UNIQUE INDEX {table}_unique "
+                    f"ON {table}({owner_col}, artist_id, role, COALESCE(instrument, ''))"
+                )
+            await self._database.execute("PRAGMA foreign_keys=ON")
+
         # save changes
         await self._database.commit()
 
@@ -2755,6 +2846,26 @@ class MusicController(CoreController):
         )
         await self.database.execute(
             f"""
+            CREATE TABLE IF NOT EXISTS {DB_TABLE_WORKS}(
+            [item_id] INTEGER PRIMARY KEY AUTOINCREMENT,
+            [name] TEXT NOT NULL,
+            [sort_name] TEXT NOT NULL,
+            [version] TEXT,
+            [favorite] BOOLEAN NOT NULL DEFAULT 0,
+            [composers] json NOT NULL DEFAULT '[]',
+            [catalog_numbers] json NOT NULL DEFAULT '[]',
+            [work_type] TEXT,
+            [parent_work] json,
+            [metadata] json NOT NULL,
+            [external_ids] json NOT NULL,
+            [timestamp_added] INTEGER DEFAULT (cast(strftime('%s','now') as int)),
+            [timestamp_modified] INTEGER NOT NULL DEFAULT 0,
+            [search_name] TEXT NOT NULL,
+            [search_sort_name] TEXT NOT NULL
+            );"""
+        )
+        await self.database.execute(
+            f"""
             CREATE TABLE IF NOT EXISTS {DB_TABLE_TRACKS}(
             [item_id] INTEGER PRIMARY KEY AUTOINCREMENT,
             [name] TEXT NOT NULL,
@@ -2769,7 +2880,11 @@ class MusicController(CoreController):
             [timestamp_added] INTEGER DEFAULT (cast(strftime('%s','now') as int)),
             [timestamp_modified] INTEGER NOT NULL DEFAULT 0,
             [search_name] TEXT NOT NULL,
-            [search_sort_name] TEXT NOT NULL
+            [search_sort_name] TEXT NOT NULL,
+            [work_id] INTEGER REFERENCES {DB_TABLE_WORKS}(item_id),
+            [movement_number] INTEGER,
+            [movement_total] INTEGER,
+            [movement_name] TEXT
             );"""
         )
         await self.database.execute(
@@ -2931,18 +3046,31 @@ class MusicController(CoreController):
             f"""CREATE TABLE IF NOT EXISTS {DB_TABLE_TRACK_ARTISTS}(
             [track_id] INTEGER NOT NULL,
             [artist_id] INTEGER NOT NULL,
+            [role] TEXT NOT NULL DEFAULT 'main_artist',
+            [instrument] TEXT,
+            [position] INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY([track_id]) REFERENCES [tracks]([item_id]),
-            FOREIGN KEY([artist_id]) REFERENCES [artists]([item_id]),
-            UNIQUE(track_id, artist_id)
+            FOREIGN KEY([artist_id]) REFERENCES [artists]([item_id])
             );"""
         )
         await self.database.execute(
             f"""CREATE TABLE IF NOT EXISTS {DB_TABLE_ALBUM_ARTISTS}(
             [album_id] INTEGER NOT NULL,
             [artist_id] INTEGER NOT NULL,
+            [role] TEXT NOT NULL DEFAULT 'main_artist',
+            [instrument] TEXT,
+            [position] INTEGER NOT NULL DEFAULT 0,
             FOREIGN KEY([album_id]) REFERENCES [albums]([item_id]),
-            FOREIGN KEY([artist_id]) REFERENCES [artists]([item_id]),
-            UNIQUE(album_id, artist_id)
+            FOREIGN KEY([artist_id]) REFERENCES [artists]([item_id])
+            );"""
+        )
+        await self.database.execute(
+            f"""CREATE TABLE IF NOT EXISTS {DB_TABLE_WORK_ARRANGEMENTS}(
+            [work_id] INTEGER NOT NULL,
+            [source_work_id] INTEGER NOT NULL,
+            FOREIGN KEY([work_id]) REFERENCES [{DB_TABLE_WORKS}]([item_id]),
+            FOREIGN KEY([source_work_id]) REFERENCES [{DB_TABLE_WORKS}]([item_id]),
+            UNIQUE(work_id, source_work_id)
             );"""
         )
 
@@ -3051,6 +3179,18 @@ class MusicController(CoreController):
             f"CREATE INDEX IF NOT EXISTS {DB_TABLE_TRACK_ARTISTS}_artist_id_idx "
             f"on {DB_TABLE_TRACK_ARTISTS}(artist_id);"
         )
+        await self.database.execute(
+            f"CREATE INDEX IF NOT EXISTS {DB_TABLE_TRACK_ARTISTS}_role_idx "
+            f"on {DB_TABLE_TRACK_ARTISTS}(role);"
+        )
+        # NULL-safe uniqueness on (track, artist, role, instrument):
+        # SQLite treats NULL != NULL in plain UNIQUE constraints, so credits
+        # without an instrument would not be deduped without COALESCE.
+        await self.database.execute(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS {DB_TABLE_TRACK_ARTISTS}_unique "
+            f"on {DB_TABLE_TRACK_ARTISTS}"
+            f"(track_id, artist_id, role, COALESCE(instrument, ''));"
+        )
         # indexes on album_artists table
         await self.database.execute(
             f"CREATE INDEX IF NOT EXISTS {DB_TABLE_ALBUM_ARTISTS}_album_id_idx "
@@ -3059,6 +3199,51 @@ class MusicController(CoreController):
         await self.database.execute(
             f"CREATE INDEX IF NOT EXISTS {DB_TABLE_ALBUM_ARTISTS}_artist_id_idx "
             f"on {DB_TABLE_ALBUM_ARTISTS}(artist_id);"
+        )
+        await self.database.execute(
+            f"CREATE INDEX IF NOT EXISTS {DB_TABLE_ALBUM_ARTISTS}_role_idx "
+            f"on {DB_TABLE_ALBUM_ARTISTS}(role);"
+        )
+        await self.database.execute(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS {DB_TABLE_ALBUM_ARTISTS}_unique "
+            f"on {DB_TABLE_ALBUM_ARTISTS}"
+            f"(album_id, artist_id, role, COALESCE(instrument, ''));"
+        )
+        # indexes on works table
+        await self.database.execute(
+            f"CREATE INDEX IF NOT EXISTS {DB_TABLE_WORKS}_sort_name_idx "
+            f"on {DB_TABLE_WORKS}(sort_name);"
+        )
+        await self.database.execute(
+            f"CREATE INDEX IF NOT EXISTS {DB_TABLE_WORKS}_search_name_idx "
+            f"on {DB_TABLE_WORKS}(search_name);"
+        )
+        # works has the standard browse indexes minus play_count/last_played
+        # (works are compositions, not directly playable)
+        for column in (
+            "favorite",
+            "name",
+            "search_sort_name",
+            "external_ids",
+            "timestamp_added",
+        ):
+            await self.database.execute(
+                f"CREATE INDEX IF NOT EXISTS {DB_TABLE_WORKS}_{column}_idx "
+                f"on {DB_TABLE_WORKS}({column});"
+            )
+        # index on tracks.work_id for the Work detail page query
+        await self.database.execute(
+            f"CREATE INDEX IF NOT EXISTS {DB_TABLE_TRACKS}_work_id_idx "
+            f"on {DB_TABLE_TRACKS}(work_id);"
+        )
+        # indexes on work_arrangements junction (bidirectional traversal)
+        await self.database.execute(
+            f"CREATE INDEX IF NOT EXISTS {DB_TABLE_WORK_ARRANGEMENTS}_work_id_idx "
+            f"on {DB_TABLE_WORK_ARRANGEMENTS}(work_id);"
+        )
+        await self.database.execute(
+            f"CREATE INDEX IF NOT EXISTS {DB_TABLE_WORK_ARRANGEMENTS}_source_work_id_idx "
+            f"on {DB_TABLE_WORK_ARRANGEMENTS}(source_work_id);"
         )
         # indexes on genre_media_item_mapping table
         await self.database.execute(
@@ -3092,6 +3277,7 @@ class MusicController(CoreController):
             "artists",
             "albums",
             "tracks",
+            "works",
             "playlists",
             "radios",
             "audiobooks",

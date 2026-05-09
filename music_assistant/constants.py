@@ -170,6 +170,8 @@ DB_TABLE_AUDIO_ANALYSIS: Final[str] = "audio_analysis"
 DB_TABLE_GENRES: Final[str] = "genres"
 DB_TABLE_GENRE_MEDIA_ITEM_MAPPING: Final[str] = "genre_media_item_mapping"
 DB_TABLE_GENRE_MEDIA_ITEM_EXCLUSION: Final[str] = "genre_media_item_exclusion"
+DB_TABLE_WORKS: Final[str] = "works"
+DB_TABLE_WORK_ARRANGEMENTS: Final[str] = "work_arrangements"
 
 # Loudness measurements at or below this value are considered unreliable:
 # ebur128 reports ~-70 LUFS when it receives near-silence or very little
