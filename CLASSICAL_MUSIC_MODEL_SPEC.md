@@ -292,6 +292,26 @@ Some users tag with tools other than Picard — most notably Roon (well-regarded
 
 How instances of these entities are matched and grouped at runtime. This belongs in the spec because it constrains what the data shape needs to support; the actual matching code lives in the server.
 
+### Canonical entity resolution via MBID
+
+**MBID is authoritative for any entity it identifies.** When a tag or provider response carries both an entity name and a MusicBrainz ID, the MBID determines the canonical entity; the supplied name is treated as a hint only. This rule applies uniformly across artist credits and works.
+
+| Tag (or provider equivalent) | Resolves | Stored on |
+|---|---|---|
+| `MUSICBRAINZ_ARTISTID` / `MUSICBRAINZ_ALBUMARTISTID` | Headline artist | `Artist.external_ids` (`MB_ARTIST`) |
+| `MUSICBRAINZ_COMPOSERID` | Composer credit | `Credit.artist.external_ids` (`MB_ARTIST`) |
+| `MUSICBRAINZ_CONDUCTORID` (where present) | Conductor credit | `Credit.artist.external_ids` (`MB_ARTIST`) |
+| `MUSICBRAINZ_PERFORMERID` (where present) | Performer / Soloist credit | `Credit.artist.external_ids` (`MB_ARTIST`) |
+| `MUSICBRAINZ_WORKID` | Work entity | `Work.external_ids` (`MB_WORK`) |
+
+**Resolution rule:**
+
+1. If a tag carries an MBID, look up the canonical entity via the MusicBrainz provider. The looked-up name supersedes the tag's text value.
+2. Two tracks referencing the same MBID with different text spellings (e.g. "Béla Bartók" vs. "Bela Bartok") resolve to the same canonical entity — solving the diacritic / transliteration / language-variant problem at the data layer rather than via fuzzy string matching.
+3. If no MBID is present, the text tag value is used as-is. **Fuzzy cross-track matching is not attempted** — surface as a suggestion via the existing OTHER VERSIONS UI when available, never auto-merge.
+
+The implementation primarily lives in Stage 4 (tag parsing) and Stage 6 (MusicBrainz enrichment); Stage 1's model already supports it via `Artist.external_ids` and the new `Work.external_ids`.
+
 ### Work matching
 
 **MusicBrainz Work MBID is the only reliable signal for "same Work".** No fuzzy match on composer + work title can reliably catch:
@@ -330,6 +350,14 @@ This is not a model concern but worth flagging since it informs query design dow
 ## Classification policy
 
 Two related runtime decisions: (1) when does a track get a `Work` entity attached, and (2) when does a track appear in the Classical view? The rules differ because the cost of getting them wrong differs.
+
+### Classical view scope by MediaType
+
+The Classical view sources exclusively from `Track`, `Album`, `Artist`, and `Work` entities. **`Radio`, `Podcast`, `PodcastEpisode`, `Audiobook`, `Genre`, `Folder`, and other non-music-library MediaTypes are excluded regardless of their genre tags.** A radio station tagged with genre "Classical" remains in the standard Radio browse and does not surface anywhere in the Classical view; same for podcasts, audiobooks, etc.
+
+This is **opt-in by MediaType, not opt-out by exclusion list** — the Classical view's queries explicitly filter to the in-scope types rather than enumerating types to exclude. New MediaTypes added in future versions are excluded by default until the Classical view's query is extended.
+
+The classification rules below ("When to create a Work entity", "When a track appears in the Classical view", "Album-level classical classification") apply only within this scope — they govern Track / Album / Artist / Work population and visibility, not Radio / Podcast / Audiobook.
 
 ### When to create a `Work` entity
 
