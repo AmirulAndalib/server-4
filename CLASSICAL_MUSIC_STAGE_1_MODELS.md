@@ -101,8 +101,8 @@ Notes:
 ### `Credit` (dataclass)
 
 ```python
-@dataclass
-class Credit:
+@dataclass(kw_only=True)
+class Credit(DataClassDictMixin):
     """A single role-tagged artist credit on a track or album."""
 
     artist: Artist | ItemMapping
@@ -116,6 +116,7 @@ Notes:
 - Free-form `instrument` string is intentional. Picard writes "violin", "piano", "soprano vocals", etc. We preserve the string as-is rather than enumerate.
 - `position` is **per-role**: each role group has its own ordering starting at 0. So a track with two SOLOIST entries and three PERFORMER entries has positions 0–1 within SOLOIST and 0–2 within PERFORMER, not a global 0–4 sequence.
 - Composer Sort Order, MusicBrainz Composer ID, and similar per-role tags do not need separate fields — they live on the underlying `Artist` (`sort_name`, `external_ids`).
+- Inherits `DataClassDictMixin` so `Credit` instances nested inside `Track.credits` / `Album.credits` round-trip through the same mashumaro serialisation pipeline as the surrounding `MediaItem`. Uses `kw_only=True` to match the existing dataclass style in `media_item.py`.
 
 ### `Work` (MediaItem)
 
@@ -130,11 +131,11 @@ class Work(MediaItem):
     """
 
     media_type: MediaType = MediaType.WORK
-    composers: list[ItemMapping] = field(default_factory=list)
+    composers: UniqueList[Artist | ItemMapping] = field(default_factory=UniqueList)
     catalog_numbers: list[str] = field(default_factory=list)   # ["Op. 67", "BWV 1041", "K. 525"]
     work_type: WorkType | None = None
     parent_work: ItemMapping | None = None                     # for movements / sub-works
-    arrangement_of: list[ItemMapping] = field(default_factory=list)  # source work(s) this is an arrangement of
+    arrangement_of: UniqueList[ItemMapping] = field(default_factory=UniqueList)  # source work(s) this is an arrangement of
     # inherited: item_id, name, sort_name, version, favorite, metadata, external_ids, …
 ```
 
@@ -232,6 +233,66 @@ class Album(MediaItem):
 Same convenience-property pattern as Track.
 
 For compilation albums, `Album.composers` and `Album.conductors` may return long lists — a "100 Greatest Classical Hits" compilation could have 50+ distinct composers. This is intentional: the data is honest about what's there, and display logic in the frontend can collapse to a placeholder like "Various composers" above some threshold. This is *not* the same as the existing `Album.artists = [Various Artists]` pattern (which uses a single placeholder Artist entity); the new credit-based properties always carry the actual list.
+
+## Supporting changes
+
+A few small additions are required across the model package to make the new types fully usable. These are mechanical and uncontroversial but worth listing so reviewers can map every new type onto a working end-to-end flow.
+
+### `ExternalID.MB_WORK`
+
+Added to `enums.py` so a Work's MusicBrainz Work ID round-trips through the existing `external_ids` set. Also added to the `is_musicbrainz` property tuple so MBID validation (`is_valid_uuid`) and uniqueness handling (`is_unique`) cover it the same way they cover the other MB IDs.
+
+```python
+class ExternalID(StrEnum):
+    ...
+    MB_WORK = "musicbrainz_workid"
+
+    @property
+    def is_musicbrainz(self) -> bool:
+        return self in (
+            ExternalID.MB_RELEASEGROUP,
+            ExternalID.MB_ALBUM,
+            ExternalID.MB_TRACK,
+            ExternalID.MB_ARTIST,
+            ExternalID.MB_RECORDING,
+            ExternalID.MB_WORK,
+        )
+```
+
+### `_MediaItemBase.mbid` getter/setter extended for Work
+
+The existing `mbid` property in `_MediaItemBase` switches on `media_type` for ARTIST / ALBUM / TRACK. A WORK branch is added to both getter and setter so `Work.mbid` reads/writes via `ExternalID.MB_WORK` consistently with the other MediaItem types.
+
+### `media_from_dict()` dispatcher
+
+The package-level `media_from_dict()` factory in `media_items/__init__.py` gains a `"work"` branch returning `Work.from_dict(media_item)`. Without this, deserialising a Work from a dict raises `InvalidDataError("Unknown media type")`.
+
+### `MediaItemType` type alias
+
+Extended from:
+
+```python
+MediaItemType = Artist | Album | Track | Radio | Playlist | Audiobook | Podcast | PodcastEpisode | Genre
+```
+
+to:
+
+```python
+MediaItemType = Artist | Album | Track | Work | Radio | Playlist | Audiobook | Podcast | PodcastEpisode | Genre
+```
+
+`PlayableMediaItemType` is **not** changed — Work is a composition, not directly playable; recordings of it (Tracks) are.
+
+### Public exports
+
+`Credit` and `Work` are added to the `__all__` list and imports in `media_items/__init__.py` so consumers can do `from music_assistant_models.media_items import Credit, Work`.
+
+## Deferred to later stages
+
+A few related changes are intentionally **not** part of this PR — recorded here so the relevant stage owner picks them up.
+
+- **`MediaTypeMeta.ALL` does not include `MediaType.WORK`.** That list is the iteration set used by server-side library traversal. Adding WORK to it before the `WorksController` exists (Stage 3) would cause queries against a non-existent controller. Stage 3 should add `MediaType.WORK` to `MediaTypeMeta.ALL` alongside the new `WorksController`.
+- **`SearchResults` does not gain a `works:` field.** Search-side classical entity types (composers, works, performers) are explicitly assigned to Stage 8 in the master spec. When that stage lands, it adds `works: Sequence[Work | ItemMapping] = field(default_factory=list)` to `SearchResults` along with the corresponding server-side query plumbing.
 
 ## Examples
 

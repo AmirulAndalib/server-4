@@ -118,8 +118,8 @@ This is a heuristic, but mirrors how Picard-tagged libraries are structured in p
 ### `Credit` (dataclass)
 
 ```python
-@dataclass
-class Credit:
+@dataclass(kw_only=True)
+class Credit(DataClassDictMixin):
     """A single role-tagged artist credit on a track or album."""
 
     artist: Artist | ItemMapping
@@ -133,6 +133,7 @@ Notes:
 - Free-form `instrument` string is intentional. Picard writes "violin", "piano", "soprano vocals", etc. in the Vorbis `PERFORMER` parens convention; we keep the string as-is rather than enumerate.
 - `position` is **per-role**: each role group has its own ordering starting at 0. So a track with two SOLOIST entries and three PERFORMER entries has positions 0–1 within SOLOIST and 0–2 within PERFORMER, not a global 0–4 sequence. Simpler to reason about, easier to render, and avoids conflating ordering across heterogeneous roles.
 - Composer Sort Order, MusicBrainz Composer ID, and similar per-role tags do not need separate fields — they are stored on the underlying `Artist` (`sort_name`, `external_ids`).
+- Inherits `DataClassDictMixin` so nested `Credit` instances inside `Track.credits` / `Album.credits` serialise/deserialise via the same mashumaro pipeline as the surrounding `MediaItem`.
 
 ### `Work` (MediaItem)
 
@@ -146,11 +147,11 @@ class Work(MediaItem):
     """
 
     media_type: MediaType = MediaType.WORK
-    composers: list[ItemMapping] = field(default_factory=list)
+    composers: UniqueList[Artist | ItemMapping] = field(default_factory=UniqueList)
     catalog_numbers: list[str] = field(default_factory=list)   # ["Op. 67", "BWV 1041", "K. 525"]
     work_type: WorkType | None = None
     parent_work: ItemMapping | None = None                     # for movements / sub-works
-    arrangement_of: list[ItemMapping] = field(default_factory=list)   # source work(s) this is an arrangement of
+    arrangement_of: UniqueList[ItemMapping] = field(default_factory=UniqueList)   # source work(s) this is an arrangement of
     # inherited: item_id, name, sort_name, version, favorite, metadata, external_ids, …
 ```
 
@@ -175,7 +176,8 @@ class WorkType(StrEnum):
 
 Notes:
 
-- `Work` is a full MediaItem so it gets `external_ids` (for the MusicBrainz Work MBID), images, descriptions, sort_name, search_name, etc. for free.
+- `Work` is a full MediaItem so it gets `external_ids` (for the MusicBrainz Work MBID), images, descriptions, sort_name, search_name, etc. for free. The `external_ids` set carries the new `ExternalID.MB_WORK` value, and `_MediaItemBase.mbid` is extended to read/write it for `MediaType.WORK` items the same way it does for ARTIST / ALBUM / TRACK.
+- `composers` and `arrangement_of` use `UniqueList` (matching the `Album.artists` codebase pattern) — these are reference lists where a duplicate is a bug. `catalog_numbers` stays a plain `list[str]` because string duplicates are low-risk and MB sometimes legitimately returns near-duplicate catalog strings.
 - `catalog_numbers` is a list because the same work can have multiple catalog references (Op. number plus a thematic catalog like K. or BWV). Stored as strings; parsing/sorting is a presentation concern.
 - `WorkType` covers the most common 12 types plus `OTHER`. MusicBrainz has ~25 types; the proposed enum covers the ones that matter for browsing/grouping. `OTHER` catches the long tail. Adding new variants later is non-breaking — consumers should fall back to `OTHER` for unknown values.
 - `parent_work` is optional and self-referential. Movements *can* be modelled as separate Works with a parent link (mirroring MusicBrainz), but the **default rule is parent Work only, with `movement_*` fields on Track**. A movement-Work row is created only when the source supplies a distinct MBID for it (i.e. the file's `MUSICBRAINZ_WORKID` points to the movement, or MB enrichment surfaces a movement-level Work entity). This avoids a row-count explosion — a Bach library with 8000 tracks would otherwise produce 8000+ Work rows for movement entities alone.
