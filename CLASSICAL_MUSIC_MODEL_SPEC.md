@@ -11,8 +11,6 @@
 
 **Why:** classical listeners today can't browse by composer, group movements under a Work, or distinguish a conductor from a soloist — the flat artist model squashes all of these into one undifferentiated list. Schema is the easier half of the problem; data quality (uneven MusicBrainz coverage, sparse streaming-provider classical metadata) is the harder half and is addressed piecemeal across Stages 4–6.
 
-**For implementers:** the per-PR docs (`CLASSICAL_MUSIC_STAGE_1_MODELS.md`, `CLASSICAL_MUSIC_STAGE_2_SCHEMA.md`, etc.) carry concrete diff-level guidance for each stage.
-
 ## Background
 
 Music Assistant currently has a flat artist model and no concept of a musical Work. Classical recordings carry credit information that doesn't fit cleanly:
