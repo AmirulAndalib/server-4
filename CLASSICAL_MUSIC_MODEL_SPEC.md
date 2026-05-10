@@ -3,6 +3,28 @@
 **Status:** Draft for discussion
 **Scope:** Full design across all stages — model, schema, parsing, providers, enrichment, frontend.
 
+## Executive summary
+
+**Problem:** Classical music doesn't fit Music Assistant's flat artist model. A track like "Karajan / Berlin Philharmonic conduct Beethoven's Symphony No. 5 (II. Andante)" needs to express that *Beethoven is the composer*, *Karajan is the conductor*, *Berlin Philharmonic is the orchestra*, and *this track is the second of four movements of one composition*. Today MA squashes all of that into a flat `artists` list and an unstructured `metadata.performers` set, so users can't browse by composer, group movements under a Work, or distinguish a conductor from an orchestra from a soloist.
+
+**Solution shape:**
+
+- **`Work` as a first-class MediaItem** — the composition (e.g. "Symphony No. 5 in C minor, Op. 67"), distinct from any specific recording. Multiple recordings of the same Work share one Work entity, matched by MusicBrainz Work MBID.
+- **Role-typed credits via a `Credit` type** — `(artist, role, instrument, position)` where role is one of `MAIN_ARTIST` / `COMPOSER` / `CONDUCTOR` / `ORCHESTRA` / `ENSEMBLE` / `CHOIR` / `SOLOIST` / `PERFORMER` / `LYRICIST` / `ARRANGER`. Sits alongside the existing flat `artists` list, which remains canonical for the headline credit.
+- **Movement linkage on `Track`** — `work` (link to parent), `movement_number`, `movement_total`, `movement_name`. Multi-movement playback and Work-grouped browse become possible.
+- **A new "Classical" top-level view** in the frontend with three internal tabs (Composers / Works / Performers), reusing existing UI patterns where possible. The Work detail page is the genuinely new page type.
+
+**Design principles** (each elaborated in subsequent sections):
+
+- **Strictly additive, non-breaking.** No existing field changes type or is removed. Old consumers keep working unchanged; new consumers opt in by reading the new fields.
+- **MBID is authoritative for any entity it identifies.** When a tag carries both a name and a MusicBrainz ID, the MBID determines the canonical entity; the supplied name is a hint only. Solves the "Béla Bartók" vs. "Bela Bartok" spelling-variant problem at the data layer rather than via fuzzy text matching.
+- **Comprehensive tagging produces the optimal outcome.** Thin tags get a thin experience by design — we deliberately do not infer composer credits from track titles or artist fields, because the false-positive risk is high (pop tracks where the artist *is* the composer would pollute the Classical view).
+- **Opt-in by MediaType.** The Classical view sources only from `Track` / `Album` / `Artist` / `Work`. `Radio`, `Podcast`, `Audiobook` etc. are explicitly excluded regardless of genre tags.
+
+**Activation timeline:** the work splits across 10 stages, each independently deployable. Stages 1 (model package) and 2 (database schema) lay the foundation. Stage 3 (controllers / API) wires the data layer end-to-end. Stage 4 (local-file tag parsing) is the first stage where users with well-tagged libraries see results. Stages 5 and 6 (streaming providers + MusicBrainz enrichment) progressively fill the gap for everyone else. Stage 7 ships the frontend Classical view. Stages 8–10 round out search, refinement, and playback behaviour. See "Implementation stages" below for the full table.
+
+**For implementers:** the per-PR docs (`CLASSICAL_MUSIC_STAGE_1_MODELS.md`, `CLASSICAL_MUSIC_STAGE_2_SCHEMA.md`, etc.) contain the concrete diff-level guidance for each stage.
+
 ## Background
 
 Music Assistant currently has a flat artist model and no concept of a musical Work. Classical recordings carry credit information that doesn't fit cleanly:
@@ -13,18 +35,37 @@ Music Assistant currently has a flat artist model and no concept of a musical Wo
 
 Standard tags (Picard mapping) and MusicBrainz both already model this richer structure. This spec brings the MA models in line.
 
+## What classical listeners actually want
+
+This design is shaped by community signal from three concrete sources cited in the References section and from the MA community's own "Better Classical Music Support" Discord thread. Synthesising across them, the consistent asks from classical listeners are:
+
+1. **Browse by composer as the primary axis.** The single most common ask. Classical listeners think in terms of composers first ("show me all my Bach"), works second ("which Brandenburg Concertos do I have?"), recordings third ("which Karajan/BPO Beethoven 5 is this?"). The current flat artist model collapses all of these into one undifferentiated list.
+2. **A Work as a first-class browseable entity.** Multiple recordings of the same composition (Beethoven's 5th: Karajan, Bernstein, Solti, etc.) should group under one Work entry, with the recordings collapsible underneath. Movements should be playable as a unit ("play the whole symphony") with gapless playback and no shuffle by default.
+3. **Distinct conductor / orchestra / soloist credits.** Today these are squashed into an undifferentiated `artists` list or the unstructured `metadata.performers` set. Users want to filter to "all Karajan recordings", "all Berlin Philharmonic recordings", "all violin recordings", and the data model needs to support that without fuzzy text matching.
+4. **Catalog numbers (BWV, K., Op., HWV…) parsed and searchable.** Often the canonical name of a work — search for "Op. 67" should find Beethoven's 5th regardless of how the title is spelled.
+5. **Structured movement metadata.** Movements link to a parent Work; the UI shows "Symphony No. 5 / I. Allegro / II. Andante…" as one unit, not four scattered tracks.
+
+**Adopted directly from precedent:**
+
+- **Roon's CMI / Three-Line Solution** influenced the role-typed credits shape: composer, conductor, orchestra, soloist, ensemble, choir, performer-with-instrument. Roon's TLS approach (computing classical-appropriate strings into the standard artist/album/track fields for non-classical-aware UIs) is also the right pattern for serving MA's existing client surfaces — though its implementation lives in Stage 7 (frontend), not in the model layer.
+- **Apple Music Classical** validated the three-axis browse structure (composer / work / performer) and the recording-year display on Work detail. We diverge deliberately on instrument as a primary browse axis (Apple makes it top-level; we keep it as a sub-filter under Soloists for data-quality reasons — see Decisions log entry 21).
+- **Classical Extras Picard plugin** is the existence proof of community demand: users are running brittle custom plugins to produce classical-specific tags because the standard tools don't support it well. This spec brings that capability into the standard tag-mapping surface (Stage 4) so the plugin becomes optional rather than necessary.
+
+**Asks deliberately deferred or out of scope:**
+
+- **Period / era as a browse axis** (Apple has it). No canonical source: no standard tag, no MusicBrainz field. Derivable from genre tags or composer dates if a user really wants it. See Decisions log entry 5 and Out of scope.
+- **Curated classical playlists** (Apple ships 700+). Content strategy, not a model concern.
+- **Composer portraits / hi-res commissioned artwork** (Apple commissioned these). Existing `MediaItem.metadata.images` supports this; sourcing is a Stage 6 enrichment detail, not a spec gap.
+- **Fuzzy matching across spelling variants without an MBID.** Not attempted — the master spec rule is "MBID is canonical, name is a hint" (see "Canonical entity resolution via MBID" under Matching policy). Surface as suggestion via OTHER VERSIONS where appropriate; never auto-merge.
+
+The mapping from each user need above to the implementing stage(s) appears in the Implementation stages table below.
+
 ## Goals
 
 - Add `Work` as a first-class MediaItem.
 - Model artist credits with explicit roles (composer, conductor, orchestra, soloist, performer with instrument, etc.).
 - Add Work / movement linkage on Track.
 - Keep the change strictly **non-breaking** for existing consumers.
-
-## Non-goals
-
-- A "period" (Baroque/Classical/Romantic) field — there is no standard tag or MusicBrainz field for this, and it can be derived from genre tags or composer dates. Out of scope.
-- Rewriting users' existing tags. Local tags are authoritative; we never overwrite or strip a tagged value.
-- Replacing the existing flat `Track.artists` / `Album.artists` fields. New role-typed credits sit alongside.
 
 ## Implementation stages
 
