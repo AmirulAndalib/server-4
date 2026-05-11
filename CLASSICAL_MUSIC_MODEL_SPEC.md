@@ -729,11 +729,15 @@ Right-click / long-press / 3-dot menu on movement and recording rows in the Clas
 ```
 Play
 Add to queue
+Remove from library
 ─────────────
 Go to album X
 Go to composer X
 Go to work X                ← navigates to parent Work detail page
 Go to performer →           ← submenu listing all non-composer credits
+─────────────
+Add to playlist
+Link to genre
 ─────────────
 More info
 Favourite / Unfavourite
@@ -744,12 +748,17 @@ Favourite / Unfavourite
 ```
 Play recording
 Add to queue
+                            ← Remove from library deliberately omitted
 ─────────────
 Go to album X               ← the album this recording is grouped within (per the within-album heuristic)
 Go to composer X
 Go to work X
 Go to performer →
 ─────────────
+Add recording to playlist   ← multi-write: queues all member movements in order
+Link recording to genre     ← multi-write: applies the genre to all member movements
+─────────────
+                            ← More info deliberately omitted
 Favourite / Unfavourite recording   (per Decisions log #23 — multi-write under one user action)
 ```
 
@@ -806,6 +815,7 @@ Records of the substantive design questions that came up during drafting and the
 22. **Classical compilations with thin tags (no composer / conductor / performer / work info).** *Resolved:* such albums appear in the Classical view if and only if their genre matches a classical genre — the only classification rule they can satisfy. When they appear, they contribute only to the Performers / All chip; the Composers tab, Works tab, and role-specific Performer chips stay empty because the structured data isn't there. We deliberately do *not* attempt fuzzy extraction from track titles (e.g. parsing "Beethoven: Symphony No. 5..." into composer + work) because false-positive risk is high — pop tracks where the artist is also the composer would pollute the index, and the parse is brittle across languages and tagging conventions. This follows the broader MA principle that **comprehensive tagging produces the optimal outcome**: thin tags get a thin experience by design. The mitigation is the standard Albums view, which remains the natural home for compilation-as-curated-unit playback regardless of tag quality (per "Coexistence with standard browse views").
 23. **Recording-level favourite semantics.** *Resolved (pending user-research validation):* favouriting a recording in the UI = favouriting all of its member movement tracks. Recording isn't a first-class entity in the model (per #20), so there is no `Recording.favorite` flag; the frontend wraps the multi-write under one user action and the backend sees N standard track-favorite updates land together. On read, a recording renders as "favourited" when all its member tracks are favourited; partial states (e.g. user un-favourites one movement after favouriting the whole recording) render as unfavourited or as a half-state per the Stage 7 UX preference. The alternative — no favourite affordance at the recording level — was considered and rejected: classical listeners want to express "the Karajan 1962 Beethoven 5 is my favourite recording" without favouriting each of four movements individually, and Work-level favourites mean something different (favouriting the composition itself, not this specific performance). **User research note:** the exact propagation rules (all-vs-any test for "is favourited" read; partial-state rendering; behaviour when a member movement is un-favourited after the recording was marked favourite) should be validated against real classical listener behaviour before Stage 7 ships. The current design uses the all-members rule; alternative interpretations are easy to swap later without model changes.
 24. **Context menu nav entries in the Classical view.** *Resolved:* the pop-music pattern of "omit the navigation entry when multiple artists are credited" does not apply in the Classical view — multi-performer is the norm in classical, not the exception, and applying that rule would mean almost no classical track has a "Go to performer" entry. Performer navigation uses a submenu listing every non-composer credit on the underlying track(s), ordered by role priority (Conductor → Ensemble → Orchestra → Choir → Soloist → Other performer), with soloists' instruments shown in parentheses. The submenu deduplicates by Artist when the same person appears in multiple credits (e.g. conductor-plus-harpsichordist, multi-instrumentalist) — combining roles/instruments in parens — because instrument lives on the `Credit`, not on the `Artist`, and all entries resolve to the same Artist detail page. "Go to album", "Go to composer", and "Go to work" remain single entries because those targets are singular (a track has at most one album; a Work has a primary composer; a movement has one parent Work). **More info** appears on the movement menu (movements are first-class `Track` entities with a canonical detail page) but is omitted from the recording menu (recordings are emergent groupings, not entities, with no canonical detail target — every "tell me more" path is already covered by the other entries). See "Context menu navigation" under Frontend integration approach for the full menu shape.
+25. **Recording-level menu operations: multi-write to member movements.** *Resolved:* operations on a recording row that map naturally onto per-track operations are implemented as **multi-write under one user action** — the frontend issues N standard track-level operations (one per member movement) and the backend sees them as ordinary per-track writes. This pattern applies to: *Favourite recording* (per #23 — favourites all member movements), *Add recording to playlist* (queues all member movements in playback order, mirroring "Play recording = gapless queue"), and *Link recording to genre* (applies the genre to all member movements; genres are per-track in the model). The exception is *Remove from library*: this is deliberately **not** offered at the recording level, because the cost of a wrong bulk action is high (multiple library removals at once, potentially across albums via APPEARS ON). Users who want to remove a whole recording from library multi-select the member movements and remove explicitly. The general principle: multi-write is acceptable for adds and toggles; deletes stay per-track for safety.
 
 ## Open questions
 
