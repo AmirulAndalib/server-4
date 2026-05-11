@@ -638,7 +638,10 @@ class SendspinPlayer(SendspinBasePlayer):
         self._attr_elapsed_time = None
         self._attr_elapsed_time_last_updated = None
 
-        await self.playback_session.cancel("new media requested")
+        # Pass keep_stream=True so the prior stream is torn down without
+        # emitting stream/end (per Sendspin spec: stream/end is reserved
+        # for queue-empty).
+        await self.playback_session.cancel("new media requested", keep_stream=True)
 
         # Cast-only: reset future before start() to avoid racing _on_stream_start
         # and to cancel any stale pending future from a previous timed-out attempt.

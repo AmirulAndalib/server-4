@@ -282,6 +282,12 @@ class _MemberPipeline:
     ready: bool = False
 
 
+class _KeepStreamCancel(str):
+    """Cancellation message marker requesting keep_stream behavior."""
+
+    __slots__ = ()
+
+
 class SendspinPlaybackSession:
     """Coordinates playback for a Sendspin player group leader.
 
@@ -394,8 +400,13 @@ class SendspinPlaybackSession:
         if pipeline is not None and pipeline.processor is not None:
             await self._close_member_ffmpeg(pipeline.processor)
 
-    async def cancel(self, reason: str) -> None:
-        """Cancel and await the active playback task, if any."""
+    async def cancel(self, reason: str, *, keep_stream: bool = False) -> None:
+        """Cancel and await the active playback task, if any.
+
+        When ``keep_stream`` is True, the cancel is part of a track change
+        (next/previous/seek/jump) rather than a real stop. The Sendspin
+        stream stays active and the player is just asked to clear buffers.
+        """
         task = self.playback_task
         if task is None:
             return
@@ -405,7 +416,7 @@ class SendspinPlaybackSession:
             return
         self.player.logger.debug("Cancelling playback task (%s)", reason)
         self._cancel_requested = True
-        task.cancel()
+        task.cancel(msg=_KeepStreamCancel(reason) if keep_stream else reason)
         with suppress(asyncio.CancelledError, Exception):
             await task
         if self.playback_task is task:
@@ -417,7 +428,7 @@ class SendspinPlaybackSession:
         if active_task is not None and not active_task.done():
             if not restart:
                 raise RuntimeError("playback already active")
-            await self.cancel("restart requested")
+            await self.cancel("restart requested", keep_stream=True)
         self._cancel_requested = False
         self.playback_task = asyncio.create_task(self._run_playback(media))
 
@@ -832,9 +843,14 @@ class SendspinPlaybackSession:
         commit_task = asyncio.create_task(_commit_pending_chunks())
         self._attach_task_exception_logger(commit_task, "commit_pending_chunks")
         producer_stopped_cleanly = False
+        cancel_keep_stream = False
         try:
             await _produce_pending_chunks()
             producer_stopped_cleanly = True
+        except asyncio.CancelledError as exc:
+            if exc.args and isinstance(exc.args[0], _KeepStreamCancel):
+                cancel_keep_stream = True
+            raise
         finally:
             if producer_stopped_cleanly and not self._cancel_requested and not commit_task.done():
                 # Mark EOF so that catchup processors promoted after this
@@ -883,8 +899,10 @@ class SendspinPlaybackSession:
                     # non-clean stop so we skip group.stop() below
                     # and let the new playback handle the transition.
                     producer_stopped_cleanly = False
+            # Suppress stream/end if a new stream will start soon after stopping this one.
+            keep_stream = cancel_keep_stream and not producer_stopped_cleanly
             with suppress(Exception):
-                self._stop_push_stream()
+                self._stop_push_stream(keep_stream=keep_stream)
             await self._clear_join_catchup()
             await self._clear_member_pipelines()
             async with self._state_lock:
@@ -1316,11 +1334,18 @@ class SendspinPlaybackSession:
                 break
         self.player.logger.debug("Client buffer drain complete")
 
-    def _stop_push_stream(self) -> None:
-        """Stop the active PushStream."""
+    def _stop_push_stream(self, *, keep_stream: bool = False) -> None:
+        """Stop the active PushStream.
+
+        Pass ``keep_stream=True`` during track transitions so the transport
+        is torn down without emitting stream/end.
+        """
         ps = self._push_stream
-        if ps is not None and not ps.is_stopped:
-            ps.stop()
+        if ps is None or ps.is_stopped:
+            return
+        if keep_stream:
+            ps.clear()
+        ps.stop(keep_stream=keep_stream)
 
     def _resolve_channel_for_player(self, player_id: str) -> UUID:
         """Channel resolver callback for per-player routing."""
