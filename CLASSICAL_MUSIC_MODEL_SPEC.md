@@ -720,6 +720,52 @@ The implementation parameterises the Work detail query with an optional `filter_
 
 Each recording on the Work detail page is rendered with a link to its source album (the album it was originally released on). This preserves the path from "browsing classical → found a recording" to "playing the original album as released" — covering the use case where a user discovers a recording via the Classical view and wants to know which album in their library it came from.
 
+### Context menu navigation
+
+Right-click / long-press / 3-dot menu on movement and recording rows in the Classical view follows MA's existing context-menu pattern (Play, Add to queue, More info, Favourite handled by the standard menu logic) plus classical-specific navigation entries.
+
+**On a movement row (an individual track within a recording):**
+
+```
+Play
+Add to queue
+─────────────
+Go to album X
+Go to composer X
+Go to work X                ← navigates to parent Work detail page
+Go to performer →           ← submenu listing all non-composer credits
+─────────────
+More info
+Favourite / Unfavourite
+```
+
+**On a recording row (the `▶ Karajan / BPO (1962)` collapsible header):**
+
+```
+Play recording
+Add to queue
+─────────────
+Go to album X               ← the album this recording is grouped within (per the within-album heuristic)
+Go to composer X
+Go to work X
+Go to performer →
+─────────────
+Favourite / Unfavourite recording   (per Decisions log #23 — multi-write under one user action)
+```
+
+The **"Go to performer" submenu** lists every non-composer credit on the underlying track(s), ordered by role priority (Conductor → Ensemble → Orchestra → Choir → Soloist → Other performer), with soloists' instruments shown in parentheses when present:
+
+```
+Go to performer →
+    Herbert von Karajan (conductor)
+    Berlin Philharmonic Orchestra (orchestra)
+    Anne-Sophie Mutter (violin)
+```
+
+**"Go to album X", "Go to composer X", and "Go to work X" remain single entries** because those targets are singular per track / movement / recording (a track has at most one album; a Work has a primary composer; a movement has one parent Work).
+
+The pop-music pattern of *omitting the navigation entry when multiple artists are credited* deliberately does not apply in the Classical view — see Decisions log entry on Context menu nav entries.
+
 ## Decisions log
 
 Records of the substantive design questions that came up during drafting and their resolutions, so reviewers don't have to re-litigate them.
@@ -747,6 +793,7 @@ Records of the substantive design questions that came up during drafting and the
 21. **Instrument as a primary browse axis vs. a sub-filter.** *Resolved:* keep instrument as a sub-filter under the Performers / Soloists chip, not as a top-level browse axis (Apple Music Classical promotes instrument to primary navigation — "all violinists" / "all piano recordings"). The reason for the deliberate divergence is data-quality risk: instrument strings sourced from `PERFORMER` parens or `TMCL` pairs are messy and inconsistent ("violin" vs. "violin solo" vs. "viola" matching too eagerly, instrument-with-modifier strings, language variants). Apple resolves this with editorial curation we can't replicate. Surfacing instrument as a primary axis on noisy data would produce a worse experience than not surfacing it; gating it behind the Soloists chip means users who reach it have already opted into a narrower context where the messiness is more tolerable. Revisit if a future canonical-instrument normalisation pass becomes available.
 22. **Classical compilations with thin tags (no composer / conductor / performer / work info).** *Resolved:* such albums appear in the Classical view if and only if their genre matches a classical genre — the only classification rule they can satisfy. When they appear, they contribute only to the Performers / All chip; the Composers tab, Works tab, and role-specific Performer chips stay empty because the structured data isn't there. We deliberately do *not* attempt fuzzy extraction from track titles (e.g. parsing "Beethoven: Symphony No. 5..." into composer + work) because false-positive risk is high — pop tracks where the artist is also the composer would pollute the index, and the parse is brittle across languages and tagging conventions. This follows the broader MA principle that **comprehensive tagging produces the optimal outcome**: thin tags get a thin experience by design. The mitigation is the standard Albums view, which remains the natural home for compilation-as-curated-unit playback regardless of tag quality (per "Coexistence with standard browse views").
 23. **Recording-level favourite semantics.** *Resolved (pending user-research validation):* favouriting a recording in the UI = favouriting all of its member movement tracks. Recording isn't a first-class entity in the model (per #20), so there is no `Recording.favorite` flag; the frontend wraps the multi-write under one user action and the backend sees N standard track-favorite updates land together. On read, a recording renders as "favourited" when all its member tracks are favourited; partial states (e.g. user un-favourites one movement after favouriting the whole recording) render as unfavourited or as a half-state per the Stage 7 UX preference. The alternative — no favourite affordance at the recording level — was considered and rejected: classical listeners want to express "the Karajan 1962 Beethoven 5 is my favourite recording" without favouriting each of four movements individually, and Work-level favourites mean something different (favouriting the composition itself, not this specific performance). **User research note:** the exact propagation rules (all-vs-any test for "is favourited" read; partial-state rendering; behaviour when a member movement is un-favourited after the recording was marked favourite) should be validated against real classical listener behaviour before Stage 7 ships. The current design uses the all-members rule; alternative interpretations are easy to swap later without model changes.
+24. **Context menu nav entries in the Classical view.** *Resolved:* the pop-music pattern of "omit the navigation entry when multiple artists are credited" does not apply in the Classical view — multi-performer is the norm in classical, not the exception, and applying that rule would mean almost no classical track has a "Go to performer" entry. Performer navigation uses a submenu listing every non-composer credit on the underlying track(s), ordered by role priority (Conductor → Ensemble → Orchestra → Choir → Soloist → Other performer), with soloists' instruments shown in parentheses. "Go to album", "Go to composer", and "Go to work" remain single entries because those targets are singular (a track has at most one album; a Work has a primary composer; a movement has one parent Work). See "Context menu navigation" under Frontend integration approach for the full menu shape on movement and recording rows.
 
 ## Open questions
 
