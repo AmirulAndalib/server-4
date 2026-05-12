@@ -894,11 +894,14 @@ class SendspinPlaybackSession:
             if producer_stopped_cleanly and not self._cancel_requested:
                 try:
                     await self._wait_for_buffer_drain()
-                except asyncio.CancelledError:
-                    # New playback interrupted the drain — treat as
+                    await asyncio.sleep(0.5)
+                except asyncio.CancelledError as exc:
+                    # New playback interrupted drain/grace — treat as
                     # non-clean stop so we skip group.stop() below
                     # and let the new playback handle the transition.
                     producer_stopped_cleanly = False
+                    if exc.args and isinstance(exc.args[0], _KeepStreamCancel):
+                        cancel_keep_stream = True
             # Suppress stream/end if a new stream will start soon after stopping this one.
             keep_stream = cancel_keep_stream and not producer_stopped_cleanly
             with suppress(Exception):
