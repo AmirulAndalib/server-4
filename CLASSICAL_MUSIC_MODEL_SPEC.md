@@ -755,12 +755,12 @@ To prevent empty / partially-empty detail pages in those cases, both Composer de
 **Composer detail:**
 
 1. **Works** (primary) — canonical compositions sorted by catalog number (default).
-2. **Other tracks** (secondary) — tracks credited to this composer where `Track.work IS NULL`. Hidden when empty. Sort by name or album.
+2. **Other tracks** (secondary) — tracks credited to this composer where `Track.work IS NULL`. Hidden when empty. Sort options: **Name** (default, alphabetical by track title), **Year** (release year), **Date added**. Album-grouping sort deliberately omitted (would require a new `album.search_name` SORT_KEYS entry; not enough value to justify).
 
 **Performer detail** (Conductor / Soloist / Orchestra / Ensemble / Choir / Other performer):
 
 1. **Works performed** (primary) — canonical compositions where this performer has a credit on at least one linked track. Per-Work `recording_count` scoped to this performer (see "Per-performer scoping of counts" above).
-2. **Other tracks** (secondary) — tracks where this performer has any non-composer credit and `Track.work IS NULL`. Hidden when empty.
+2. **Other tracks** (secondary) — tracks where this performer has any non-composer credit and `Track.work IS NULL`. Hidden when empty. Same sort options as Composer detail's Other tracks: **Name** (default), **Year**, **Date added**.
 
 The "Other tracks" surface is **local to detail pages**, not a global browse axis. The Classical view's Works tab stays Work-centric — synthetic / placeholder Work entities are **not** created for thin-tagged tracks (rejected: pollutes the global Works tab, groups unrelated tracks under fake aggregates, conflicts with the conservative work-creation policy). The fix lives only where the entity-centric context justifies it — on the detail page that knows about the specific entity's credits.
 
