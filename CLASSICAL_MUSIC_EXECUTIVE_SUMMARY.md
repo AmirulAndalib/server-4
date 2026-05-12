@@ -8,7 +8,7 @@ I have been working with Claude and the full design is in [`CLASSICAL_MUSIC_MODE
 
 ## The problem
 
-MA's current artist model is flat. A track has an `artists` list — period. There's no distinction between composer, conductor, orchestra, soloist, or accompanist. Classical music depends on those distinctions as evidenced by this user comment:
+MA's current artist model is flat. A track has an `artists` list — period. There's no distinction between composer, conductor, orchestra, soloist, or accompanist. Classical music depends on those distinctions. For instance:
 
 > *Karajan / Berlin Philharmonic conduct Beethoven's Symphony No. 5: II. Andante con moto*
 >
