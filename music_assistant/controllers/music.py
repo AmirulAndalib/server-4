@@ -2681,8 +2681,24 @@ class MusicController(CoreController):
 
         if prev_version <= 40:
             # Stage 2 of classical music support: add works table, work_arrangements
-            # junction, work/movement columns on tracks, and role/instrument/position
-            # columns on track_artists / album_artists with backfill to 'main_artist'.
+            # junction, work/movement columns on tracks, role/instrument/position
+            # columns on track_artists / album_artists with backfill to 'main_artist',
+            # and the artists.period + {tracks,albums,artists}.is_classical columns
+            # (populated in stages 4 + 6).
+            for column_sql in (
+                f"ALTER TABLE {DB_TABLE_ARTISTS} ADD COLUMN [period] TEXT",
+                f"ALTER TABLE {DB_TABLE_TRACKS} ADD COLUMN [is_classical] "
+                f"INTEGER NOT NULL DEFAULT 0",
+                f"ALTER TABLE {DB_TABLE_ALBUMS} ADD COLUMN [is_classical] "
+                f"INTEGER NOT NULL DEFAULT 0",
+                f"ALTER TABLE {DB_TABLE_ARTISTS} ADD COLUMN [is_classical] "
+                f"INTEGER NOT NULL DEFAULT 0",
+            ):
+                try:
+                    await self._database.execute(column_sql)
+                except Exception as err:
+                    if "duplicate column" not in str(err):
+                        raise
             await self._database.execute(
                 f"""CREATE TABLE IF NOT EXISTS {DB_TABLE_WORKS}(
                 [item_id] INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -2824,7 +2840,8 @@ class MusicController(CoreController):
                     [timestamp_added] INTEGER DEFAULT (cast(strftime('%s','now') as int)),
                     [timestamp_modified] INTEGER NOT NULL DEFAULT 0,
                     [search_name] TEXT NOT NULL,
-                    [search_sort_name] TEXT NOT NULL
+                    [search_sort_name] TEXT NOT NULL,
+                    [is_classical] BOOLEAN NOT NULL DEFAULT 0
                 );"""
         )
         await self.database.execute(
@@ -2841,7 +2858,9 @@ class MusicController(CoreController):
             [timestamp_added] INTEGER DEFAULT (cast(strftime('%s','now') as int)),
             [timestamp_modified] INTEGER NOT NULL DEFAULT 0,
             [search_name] TEXT NOT NULL,
-            [search_sort_name] TEXT NOT NULL
+            [search_sort_name] TEXT NOT NULL,
+            [period] TEXT,
+            [is_classical] BOOLEAN NOT NULL DEFAULT 0
             );"""
         )
         await self.database.execute(
@@ -2884,7 +2903,8 @@ class MusicController(CoreController):
             [work_id] INTEGER REFERENCES {DB_TABLE_WORKS}(item_id),
             [movement_number] INTEGER,
             [movement_total] INTEGER,
-            [movement_name] TEXT
+            [movement_name] TEXT,
+            [is_classical] BOOLEAN NOT NULL DEFAULT 0
             );"""
         )
         await self.database.execute(
