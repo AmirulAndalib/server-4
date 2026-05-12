@@ -510,9 +510,15 @@ An album is classified as classical if a majority of its tracks satisfy any of t
 
 `Artist.period` is set on composer Artists only. Two tiered sources, applied in **priority order** — first non-null wins; existing values are not overwritten by lower-priority sources:
 
-1. **GENRE-tag period (Stage 4) — primary, user-controlled.** The Stage 4 parser inspects multi-value `GENRE` tags on tracks where this Artist has a `COMPOSER` credit. If any period name appears in the genre list (case-insensitive match: `Baroque`, `Romantic`, `Medieval`, `Renaissance`, `Classical`, `Modern` / `20th Century`, `Contemporary` / `21st Century`), the corresponding `Period` value is stamped on the composer Artist. The first track to provide a period wins for that composer.
+1. **Genre period from any source (Stage 4) — primary, user-controlled.** The Stage 4 parser inspects genre values from **all sources MA already reads**:
 
-   **Tag-as-override deliberate inversion.** This sits *above* MB enrichment, not below, because period for boundary composers is genuinely subjective (Beethoven could reasonably be Classical or Romantic depending on which works the user listens to most) — there's no canonical answer to enforce. Giving the GENRE tag priority makes period **user-overridable today without waiting for a manual-override UI**: a user who disagrees with the MB-inferred placement of a composer just adds the desired period to a GENRE tag on any track by that composer. Inversion is limited to this one field; the MBID-canonical rule still applies everywhere else.
+   - Multi-value `GENRE` tag on tracks where this Artist has a `COMPOSER` credit (Vorbis comments, ID3 `TCON`, MP4 `©gen`, etc.).
+   - `<genre>` elements in `artist.nfo` for this composer (Kodi convention; see `filesystem_local/__init__.py:1189-1190`).
+   - `<genre>` elements in `album.nfo` for albums where this composer has track credits.
+
+   If any period name appears in the combined genre set (case-insensitive match: `Baroque`, `Romantic`, `Medieval`, `Renaissance`, `Classical`, `Modern` / `20th Century`, `Contemporary` / `21st Century`), the corresponding `Period` value is stamped on the composer Artist. Source precedence within this tier when multiple sources name different periods: `artist.nfo` > `album.nfo` > track tags (NFO files are explicitly composer-centric / album-centric metadata, so the user's intent is clearer there than on a per-track tag). The first source-and-track to provide a period wins; subsequent conflicting values are not reconciled.
+
+   **Tag-as-override deliberate inversion.** This sits *above* MB enrichment, not below, because period for boundary composers is genuinely subjective (Beethoven could reasonably be Classical or Romantic depending on which works the user listens to most) — there's no canonical answer to enforce. Giving genre priority makes period **user-overridable today without waiting for a manual-override UI**: a user who disagrees with the MB-inferred placement of a composer just adds the desired period to a `<genre>` element in that composer's `artist.nfo` (easiest, single-file edit) or to a GENRE tag on any of that composer's tracks. Inversion is limited to this one field; the MBID-canonical rule still applies everywhere else.
 
 2. **MusicBrainz enrichment (Stage 6) — secondary, automatic.** When the GENRE-tag path is silent and the Artist has an MBID with birth/death dates available, the period is inferred from the composer's **floruit** (productive peak), approximated as the midpoint of `(birth_year + 25, death_year − 5)` — roughly the composer's prime working years:
 
@@ -545,7 +551,7 @@ An album is classified as classical if a majority of its tracks satisfy any of t
 
 3. **Manual override (future polish).** A dedicated per-Composer override UI is out of scope for the initial implementation; the GENRE-tag path serves as the override mechanism for now. When the dedicated override lands, it sits above both sources.
 
-`Artist.period` is null when neither source resolves — performer-only artists (no `COMPOSER` credit), composers without an MB-linked MBID where tracks lack period genre tags, and composers whose MB record lacks birth/death dates. The Composers tab's period filter chip treats null as "unknown" and excludes those artists from period-specific filters but keeps them in the "All periods" view.
+`Artist.period` is null when neither source resolves — performer-only artists (no `COMPOSER` credit), composers without an MB-linked MBID where no period genre exists on any track tag or NFO file, and composers whose MB record lacks birth/death dates. The Composers tab's period filter chip treats null as "unknown" and excludes those artists from period-specific filters but keeps them in the "All periods" view.
 
 **Edge cases.** Composers spanning two periods (Beethoven, Schubert, Schoenberg, Mahler) get their closest-fit single period via the floruit rule; users disagreeing with the placement use the GENRE-tag path to override. Stylistic pastiches (a 1985 piece written in Baroque style) accept their composer's period today; a future `Work.period` override addresses per-piece pinning if/when real demand emerges.
 
