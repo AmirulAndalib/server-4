@@ -31,7 +31,7 @@ Synthesised from the Roon CMI/TLS forums discussion, Apple Music Classical's lau
 4. **Catalog numbers (BWV / K. / Op. / HWV) parsed and searchable** — often the canonical handle for a work.
 5. **Roll-up across granularity.** The same recording / track / movement appears in many shapes: a single track, a movement of a full work on its source album, the same single track on a compilation, a transcription across instruments (Mussorgsky's *Pictures at an Exhibition* piano original ↔ Ravel's orchestration; Bach organ ↔ piano transcriptions). The data needs to detect each as distinct *and* roll it up to album / work / composer / performer where appropriate. Concrete example from Pärt's catalogue: *Spiegel im Spiegel* appears as three different pieces on its own album plus single tracks on *Alina*, *Fratres*, and *Stabat mater*, all with different performers — a user should reach the same composition from any of those entry points.
 
-**Asks deliberately deferred or out of scope:** period / era as a primary browse axis (no canonical source — Decisions log #5); fuzzy matching across spelling variants without an MBID (resolved in the Matching policy via the MBID-canonical rule); curated classical playlists and commissioned composer artwork (content / sourcing concerns, not model). See the relevant sections for detail.
+**Asks deliberately deferred or out of scope:** fuzzy matching across spelling variants without an MBID (resolved in the Matching policy via the MBID-canonical rule); curated classical playlists and commissioned composer artwork (content / sourcing concerns, not model). Period / era support: model field added (`Artist.period`, Decisions log #5 revised), filter-chip UI deferred to a future polish stage after Stage 7. See the relevant sections for detail.
 
 The mapping from each user need above to the implementing stage(s) appears in the Implementation stages table below.
 
@@ -204,6 +204,23 @@ Notes:
 
 Added value to the existing `MediaType` enum. Old consumers that switch over `MediaType` will fall through to their default case, which is the same behaviour as encountering a future unknown type.
 
+### `Period` (enum)
+
+```python
+class Period(StrEnum):
+    """Classical music period / era. Used on Artist (composer) for browse filtering."""
+
+    MEDIEVAL = "medieval"           # c. 500 – 1400
+    RENAISSANCE = "renaissance"     # c. 1400 – 1600
+    BAROQUE = "baroque"             # c. 1600 – 1750
+    CLASSICAL = "classical"         # c. 1750 – 1820
+    ROMANTIC = "romantic"           # c. 1820 – 1900
+    MODERN = "modern"               # c. 1900 – 1975 (20th century)
+    CONTEMPORARY = "contemporary"   # c. 1975 – present (21st century)
+```
+
+Date ranges are documentation, not enforced by the enum — they exist to anchor inference rules in `Classification policy`. The seven buckets match Apple Music Classical, Roon, IMSLP, and Wikipedia consensus; edge composers (Beethoven straddles Classical/Romantic; Schoenberg straddles Romantic/Modern) get their closest-fit period. A composer's `period` is the **primary** period of their output, not a list — filter UX is forgiving and a single primary value keeps queries simple.
+
 ## Modified types
 
 ### `Track`
@@ -266,6 +283,24 @@ class Album(MediaItem):
 (Same convenience-property pattern as Track.)
 
 For compilation albums, `Album.composers` and `Album.conductors` may return long lists — a "100 Greatest Classical Hits" compilation could have 50+ distinct composers. This is intentional: the data is honest about what's there, and display logic in the frontend can collapse to a placeholder like "Various composers" above some threshold. This is *not* the same as the existing `Album.artists = [Various Artists]` pattern (which uses a single placeholder Artist entity); the new credit-based properties always carry the actual list.
+
+### `Artist`
+
+Additive field only:
+
+```python
+@dataclass
+class Artist(MediaItem):
+    # ... existing fields unchanged ...
+
+    period: Period | None = None
+```
+
+Notes:
+
+- Populated for Artists with a `COMPOSER` role in any of their track credits; null for performer-only artists (a Karajan or Berlin Philharmonic Artist row has no `period` because performers span periods across their repertoire).
+- Sourced from: (1) MB enrichment (Stage 6) — composer Artist's birth/death dates map to the bucket their primary output falls in; (2) tag-based fallback (Stage 4) — period name parsed out of a multi-value `GENRE` tag on a track whose composer credit resolves to this Artist; (3) future manual override (out of scope for the initial implementation).
+- Used as a filter chip on the Composers tab and (transitively, by joining through `track_artists` where `role=COMPOSER`) the Works tab. Not exposed as a sort axis — periods have no natural sort order users browse by.
 
 ## Field provenance
 
@@ -470,6 +505,32 @@ An album is classified as classical if a majority of its tracks satisfy any of t
 | Jazz album with composer credits ("Take Five" — Paul Desmond) | **Not** in Classical view; no Works |
 | Singer-songwriter album where artist self-credits as composer | **Not** in Classical view; no Works |
 | Classical compilation tagged only with basic fields (`ARTIST` / `TITLE` / `GENRE=Classical`, no composer / conductor / performer / work info) | Appears in the Classical view via the genre rule. Contributes only to the Performers / All chip — absent from the Composers tab, Works tab, and role-specific Performer chips because the structured data isn't there. Best browsed via the standard Albums view. (See decisions log on thin-tag compilations.) |
+
+### Populating `Artist.period`
+
+`Artist.period` is set on composer Artists only. Three tiered sources, applied in order — first non-null wins; existing values are not overwritten by lower-priority sources:
+
+1. **MusicBrainz enrichment (Stage 6) — primary.** When the Artist has an MBID and MB returns birth/death dates, the period is inferred from the composer's primary working dates:
+
+   | Composer flourishing | Period |
+   |---|---|
+   | died before 1400 | `MEDIEVAL` |
+   | died 1400 – 1600 | `RENAISSANCE` |
+   | died 1600 – 1750 | `BAROQUE` |
+   | died 1750 – 1820 | `CLASSICAL` |
+   | died 1820 – 1900 | `ROMANTIC` |
+   | died 1900 – 1975 | `MODERN` |
+   | died after 1975, or still living | `CONTEMPORARY` |
+
+   Death-date based rather than birth-date based because most composers' significant output lands in the second half of their life. Beethoven (d. 1827) → `ROMANTIC` despite the early symphonies being Classical; Schoenberg (d. 1951) → `MODERN` despite early Romantic-period works. These are pragmatic single-bucket choices; users wanting the per-Work granularity can use a future `Work.period` override (see edge-cases note below).
+
+2. **GENRE tag fallback (Stage 4) — secondary.** When MB enrichment isn't available, the Stage 4 parser inspects multi-value `GENRE` tags on tracks where this Artist has a `COMPOSER` credit. If any period name appears in the genre list (case-insensitive match: `Baroque`, `Romantic`, `Medieval`, etc.), the corresponding `Period` value is stamped on the composer Artist. The first track to provide a period wins for that composer; conflicting genre tags across tracks under the same composer are not reconciled (the field is single-valued, the chip filter is forgiving).
+
+3. **Manual override (future polish).** Out of scope for the initial implementation. When added, a user-set value takes precedence over both above sources and is not overwritten by re-enrichment.
+
+`Artist.period` is null when none of the three sources resolves — most performer artists, composers without MB enrichment, and composers whose tracks lack period genre tags. The Composers tab's period filter chip treats null as "unknown" and excludes those artists from period-specific filters but keeps them in the "All periods" view.
+
+**Edge cases.** Composers spanning two periods (Beethoven, Schoenberg, Mahler) get their closest-fit single period and are accepted as approximate; a future `Work.period` override field can pin individual works to the other side of the boundary when real demand emerges. Stylistic pastiches (a 1985 piece written in Baroque style) similarly accept their composer's period today; per-Work override addresses these if/when needed.
 
 ### User overrides (future polish)
 
@@ -900,7 +961,7 @@ Records of the substantive design questions that came up during drafting and the
 2. **Movements as Works vs. just movement fields.** *Resolved:* parent Work only with `movement_*` fields on Track is the default. Movement-Works only created when the source supplies a distinct MBID for them. (See `Work` notes.)
 3. **`WorkType` granularity.** *Resolved:* 12 common types + `OTHER`. Easy to extend later; consumers should fall back to `OTHER` for unknown values.
 4. **`Credit.position` semantics.** *Resolved:* per-role ordering, each role group starts at 0.
-5. **Period / era field.** *Resolved:* out of scope. No canonical source (no standard tag, no MB field). Genre tags cover this for users who want it.
+5. **Period / era field.** *Resolved (revised):* in scope as a new optional `Artist.period: Period | None` field with seven enum values (Medieval / Renaissance / Baroque / Classical / Romantic / Modern / Contemporary) — matching Apple Music Classical, Roon, IMSLP, and Wikipedia consensus. Original concern about "no canonical source" addressed by tiered population: MB enrichment (composer birth/death dates) is the primary path, GENRE-tag fallback is the secondary path (period names recognised within multi-value GENRE during Stage 4 parsing), manual override is future polish. Lives on Artist (not Work) — works inherit from composer at query time; works straddling periods or stylistic pastiches are edge cases that can get a `Work.period` override later if real demand emerges. Used as a **filter chip** on Composers and Works tabs, not as a sort axis. Considered putting it directly on Work (rejected — derivable from composer, avoids row-level duplication), considered storing as a list to handle composer-spans-periods cases (rejected — single primary period keeps filter UX simple and queries cheap; edge composers get closest-fit period). Adding the enum + field now while Stage 1 / Stage 2 are open avoids a later model bump + migration; population is deferred until Stage 4 (tag fallback) and Stage 6 (MB enrichment).
 6. **Promoting classical sub-views to main nav vs. internal tabs.** *Resolved:* single top-level "Classical" entry with internal tabs. Main nav approaching capacity; classical sub-views only useful to users with classical content. (See "Frontend integration approach".)
 7. **Whether to recommend Classical Extras (Picard plugin) to users.** *Resolved:* **actively recommend against it for new tagging.** Plugin destructively rewrites `ARTIST` (replacing the MB-canonical composer name with the performer name, depending on configuration), produces wrong data when MB lacks Work info (the Vivaldi/Kennedy case), encodes hierarchy with trailing `::` separators that need stripping (see Tag fallbacks subsection), and configuration variance is enormous so different users get different rewrites. Standard Picard with iTunes-style movement tags enabled gives the parser the same useful signal (`WORK`, `MUSICBRAINZ_WORKID`, `MOVEMENTNAME` / `MOVEMENTNUMBER` / `MOVEMENTTOTAL`, `performer:instrument`) without the destructive ARTIST rewrite. **For existing Classical-Extras-tagged libraries:** MA's Stage 4 parser supports the plugin's common output tag names as fallbacks (`groupheading`, `top_work`, `is_classical`, `movement`, etc.) so users can switch the plugin off going forward without re-tagging their existing files. New tagging should use standard Picard.
 8. **Tab layout inside the Classical view.** *Resolved:* three tabs — Composers / Works / Performers — with role-filter chips inside Performers (*All / Conductors / Orchestras / Chamber groups / Choirs / Soloists / Other performers*). Considered five tabs (separate Conductors and Ensembles) and four tabs (with a Search tab), both rejected. Five tabs duplicate the navigation for symphonic repertoire and miss chamber/a-cappella music; the fourth Search tab is redundant once the global search has a Classical chip. Combined Performers tab with chips reuses MA's existing filter pattern (album-type filter precedent). (See "Tab layout inside the Classical view".)

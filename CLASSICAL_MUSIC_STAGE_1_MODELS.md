@@ -10,6 +10,7 @@ Adds first-class classical-music metadata to the shared models package:
 
 - A new `Work` MediaItem representing a musical composition (e.g. *Symphony No. 5 in C minor, Op. 67*) independently of any specific recording.
 - An `ArtistRole` enum and `Credit` type so artists on a track or album can carry their role (composer, conductor, orchestra, soloist with instrument, …) instead of being a flat list.
+- A `Period` enum (Medieval / Renaissance / Baroque / Classical / Romantic / Modern / Contemporary) and additive `Artist.period` field for filtering composers by period — populated in Stage 4 (tag fallback) and Stage 6 (MB enrichment).
 - Additive fields on `Track` and `Album` for work/movement linkage and the role-typed credits list.
 
 Strictly **non-breaking**. No existing field changes type or is removed. Old consumers continue working without code changes.
@@ -171,6 +172,23 @@ Notes:
 
 Added value to the existing `MediaType` enum. Old consumers that switch over `MediaType` will fall through to their default case — same behaviour as encountering any future unknown type.
 
+### `Period` (enum)
+
+```python
+class Period(StrEnum):
+    """Classical music period / era. Used on Artist (composer) for browse filtering."""
+
+    MEDIEVAL = "medieval"           # c. 500 – 1400
+    RENAISSANCE = "renaissance"     # c. 1400 – 1600
+    BAROQUE = "baroque"             # c. 1600 – 1750
+    CLASSICAL = "classical"         # c. 1750 – 1820
+    ROMANTIC = "romantic"           # c. 1820 – 1900
+    MODERN = "modern"               # c. 1900 – 1975
+    CONTEMPORARY = "contemporary"   # c. 1975 – present
+```
+
+Seven buckets matching Apple Music Classical / Roon / IMSLP / Wikipedia consensus. Date ranges are documentation only; inference rules (MB enrichment from composer dates, GENRE-tag fallback) live in the master spec's Classification policy. Population is deferred to Stage 4 (tag fallback) and Stage 6 (MB enrichment) — this PR just establishes the enum so the model is ready.
+
 ## Modified types
 
 ### `Track`
@@ -233,6 +251,20 @@ class Album(MediaItem):
 Same convenience-property pattern as Track.
 
 For compilation albums, `Album.composers` and `Album.conductors` may return long lists — a "100 Greatest Classical Hits" compilation could have 50+ distinct composers. This is intentional: the data is honest about what's there, and display logic in the frontend can collapse to a placeholder like "Various composers" above some threshold. This is *not* the same as the existing `Album.artists = [Various Artists]` pattern (which uses a single placeholder Artist entity); the new credit-based properties always carry the actual list.
+
+### `Artist`
+
+Additive field only:
+
+```python
+@dataclass
+class Artist(MediaItem):
+    # ... existing fields unchanged ...
+
+    period: Period | None = None
+```
+
+Set on composer Artists only (Artists with `COMPOSER` role on at least one track credit); null for performers. Population paths and inference rules live in the master spec's Classification policy section. This PR just establishes the field on the model.
 
 ## Supporting changes
 
