@@ -152,6 +152,18 @@ A short list of things to watch for:
 5. **One album-artist convention per release.** Don't mix "Various Artists" on one classical compilation and the composer's name on another similar compilation — pick a convention.
 6. **Skip the Classical Extras Picard plugin** for new tagging. It writes non-standard tag names (`groupheading`, `top_work`, `is_classical`, `MOVEMENT`) which MA *does* read as fallbacks, but it also destructively rewrites your ARTIST field with potentially unwanted values. Standard Picard with iTunes movement tags enabled (covered below) gives MA everything it needs without that risk.
 
+## Sort names (optional, for classical-convention alphabetisation)
+
+By default MA uses the display name as the sort name — `Ludwig van Beethoven` sorts under "L", not "B". To get classical-convention surname-first sorting on the Composers tab's "Sort name" ordering, set the matching SORT tag explicitly:
+
+| Display tag | Sort tag |
+|---|---|
+| `COMPOSER` | `COMPOSERSORT` |
+| `ARTIST` | `ARTISTSORT` |
+| `ALBUMARTIST` | `ALBUMARTISTSORT` |
+
+Use `Lastname, Firstname` form (`Beethoven, Ludwig van`, `Mozart, Wolfgang Amadeus`). MA uses these verbatim.
+
 ## Optional but useful
 
 ```
