@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -58,6 +57,20 @@ _ICY_STANDARD_INTERVAL: int = 16_384
 
 
 @dataclass
+class _ListenerSession:
+    """
+    State shared between a listener handler and incoming take-over requests.
+
+    ``cancelled`` is set by the take-over path to ask the active handler to
+    stop streaming at the next chunk boundary. ``finished`` is set by the
+    handler once it has fully released its ffmpeg pipeline and queue state.
+    """
+
+    cancelled: asyncio.Event = field(default_factory=asyncio.Event)
+    finished: asyncio.Event = field(default_factory=asyncio.Event)
+
+
+@dataclass
 class _Station:
     """Runtime registration data for a single web radio station."""
 
@@ -67,7 +80,7 @@ class _Station:
     url_path: str
     unregister_route: Callable[[], None]
     takeover_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    active_listener_task: asyncio.Task[web.StreamResponse] | None = None
+    active_session: _ListenerSession | None = None
 
 
 class WebRadioProvider(PlayerProvider):
@@ -279,33 +292,48 @@ class WebRadioProvider(PlayerProvider):
         :param request: Inbound aiohttp request.
         """
         station = self._station_for_request(request)
-        my_task = asyncio.current_task()
-        if my_task is None:
-            raise RuntimeError("Web radio handler must run inside an asyncio task")
 
-        # Browsers and many media clients open several parallel connections to a
-        # stream URL. We can only have one producer per queue, so the newest
-        # listener takes over and the previous one is cancelled cleanly.
+        # Browsers and many media clients open several parallel connections to
+        # a stream URL. There can only be one producer per queue, so the newest
+        # listener wins. We ask the previous handler (if any) to stop at its
+        # next chunk boundary and wait for it to finish releasing its ffmpeg
+        # pipeline before the new handler starts a fresh one. A cooperative
+        # flag is used rather than task cancellation because cancelling a task
+        # mid-ffmpeg-cleanup can race the subprocess transport on Python 3.14.
         async with station.takeover_lock:
-            previous = station.active_listener_task
-            if previous is not None and previous is not my_task and not previous.done():
-                previous.cancel()
-                with suppress(asyncio.CancelledError):
-                    await previous
-            station.active_listener_task = my_task
+            previous = station.active_session
+            if previous is not None and not previous.finished.is_set():
+                previous.cancelled.set()
+                try:
+                    await asyncio.wait_for(previous.finished.wait(), timeout=5.0)
+                except TimeoutError:
+                    self.logger.warning(
+                        "Previous listener on station %s did not exit within 5s; proceeding anyway",
+                        station.slug,
+                    )
+            session = _ListenerSession()
+            station.active_session = session
 
         try:
-            return await self._serve_stream(request, station)
+            return await self._serve_stream(request, station, session)
         finally:
-            if station.active_listener_task is my_task:
-                station.active_listener_task = None
+            session.finished.set()
+            if station.active_session is session:
+                station.active_session = None
 
-    async def _serve_stream(self, request: web.Request, station: _Station) -> web.StreamResponse:
+    async def _serve_stream(
+        self,
+        request: web.Request,
+        station: _Station,
+        session: _ListenerSession,
+    ) -> web.StreamResponse:
         """
         Stream the active queue contents as a single continuous response.
 
         :param request: Inbound aiohttp request.
         :param station: Resolved station record.
+        :param session: Per-listener session used to receive a cooperative
+            take-over signal from a later request.
         """
         player = station.player
         queue = self.mass.player_queues.get(station.player_id)
@@ -373,6 +401,8 @@ class WebRadioProvider(PlayerProvider):
                 extra_input_args=["-readrate", "1.1", "-readrate_initial_burst", "5"],
                 chunk_size=ffmpeg_chunk_size,
             ):
+                if session.cancelled.is_set():
+                    break
                 try:
                     await resp.write(chunk)
                 except (BrokenPipeError, ConnectionResetError, ConnectionError):
