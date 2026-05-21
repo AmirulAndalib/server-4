@@ -513,6 +513,11 @@ class WebRadioPlayer(Player):
         )
 
     @property
+    def requires_flow_mode(self) -> bool:
+        """A station is always consumed via a flow stream, listener or not."""
+        return True
+
+    @property
     def station_slug(self) -> str:
         """Return the URL-safe slug of this station."""
         return self._station_slug
@@ -576,6 +581,15 @@ class WebRadioPlayer(Player):
         self._attr_playback_state = PlaybackState.PLAYING
         self._attr_elapsed_time = 0
         self._attr_elapsed_time_last_updated = time.time()
+        # The queue is consumed via a flow stream even when no listener is
+        # connected yet, so set the runtime flag now. Without this MA's queue
+        # controller treats the queue as non-flow and tries to enqueue the
+        # next track via PlayerFeature.ENQUEUE, which this player doesn't
+        # support. get_queue_flow_stream re-sets the same flag once an
+        # actual listener attaches.
+        queue = self.mass.player_queues.get(self.player_id)
+        if queue is not None:
+            queue.flow_mode = True
         self.update_state()
 
     async def play(self) -> None:
