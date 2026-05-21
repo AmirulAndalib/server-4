@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -48,6 +49,7 @@ if TYPE_CHECKING:
     from music_assistant_models.config_entries import ConfigValueType, ProviderConfig
     from music_assistant_models.player_queue import PlayerQueue
     from music_assistant_models.provider import ProviderManifest
+    from music_assistant_models.queue_item import QueueItem
 
     from music_assistant.mass import MusicAssistant
 
@@ -341,6 +343,8 @@ class WebRadioProvider(PlayerProvider):
         if queue is None or start_item is None:
             raise web.HTTPServiceUnavailable(reason=f"Station {station.slug!r} has nothing playing")
 
+        _join_at_live_position(queue, start_item)
+
         flow_pcm_format = await self.mass.streams.audio.select_flow_format(player)
         output_format = await self.mass.streams.audio.get_output_format(
             output_format_str=station.url_path.rsplit(".", 1)[-1],
@@ -420,6 +424,30 @@ class WebRadioProvider(PlayerProvider):
             self.logger.debug("Web radio listener disconnected: station=%s", station.slug)
 
         return resp
+
+
+def _join_at_live_position(queue: PlayerQueue, start_item: QueueItem) -> None:
+    """
+    Seek the upcoming flow stream into the current item's live position.
+
+    The station's elapsed_time is wallclock-tracked from ``play_media``, so by
+    the time a new listener (re)connects, ``queue.elapsed_time`` reflects how
+    far into the current track the station would be if playback were never
+    interrupted. We mutate the start item's ``streamdetails.seek_position`` so
+    the first track of the new flow stream resumes from there instead of
+    restarting. Subsequent tracks load with fresh streamdetails and are
+    unaffected.
+
+    :param queue: Active queue for the station.
+    :param start_item: Queue item from which the flow stream will start.
+    """
+    streamdetails = start_item.streamdetails
+    if streamdetails is None or not streamdetails.allow_seek or not streamdetails.duration:
+        return
+    seek_seconds = int(queue.elapsed_time or 0)
+    if seek_seconds <= 0 or seek_seconds >= streamdetails.duration:
+        return
+    streamdetails.seek_position = seek_seconds
 
 
 def _icy_metadata_for_queue(queue: PlayerQueue, icy_preference: object) -> tuple[str, str | None]:
@@ -525,24 +553,32 @@ class WebRadioPlayer(Player):
 
     async def play_media(self, media: PlayerMedia) -> None:
         """
-        Mark the station as playing.
+        Mark the station as playing and start the wallclock progress anchor.
 
         :param media: Details of the media item to play.
         """
-        # A web radio station has no external sink: audio only flows when an
-        # HTTP listener connects to the station URL. We just track state here
-        # so the MA queue controller progresses correctly.
+        # The station has no external sink: audio only leaves the box when an
+        # HTTP listener connects. We still anchor elapsed_time here so MA's
+        # queue controller can wallclock-advance current_item (and therefore
+        # the artwork/title shown in the UI) as if the queue were playing.
         self._attr_current_media = media
         self._attr_playback_state = PlaybackState.PLAYING
+        self._attr_elapsed_time = 0
+        self._attr_elapsed_time_last_updated = time.time()
         self.update_state()
 
     async def play(self) -> None:
-        """Resume playback (state-only)."""
+        """Resume playback and re-anchor the wallclock elapsed time."""
         self._attr_playback_state = PlaybackState.PLAYING
+        if self._attr_elapsed_time_last_updated is None:
+            self._attr_elapsed_time = self._attr_elapsed_time or 0
+            self._attr_elapsed_time_last_updated = time.time()
         self.update_state()
 
     async def stop(self) -> None:
-        """Stop playback and clear current media (state-only)."""
+        """Stop playback, clear current media and reset the elapsed clock."""
         self._attr_playback_state = PlaybackState.IDLE
         self._attr_current_media = None
+        self._attr_elapsed_time = None
+        self._attr_elapsed_time_last_updated = None
         self.update_state()
