@@ -36,6 +36,7 @@ from music_assistant.models.player import Player
 from music_assistant.models.player_provider import PlayerProvider
 
 from .constants import (
+    CONF_ENTRY_ENABLE_ICY_METADATA_BASIC,
     CONF_STATIONS,
     CONF_STREAM_URL_LABEL,
     PLAYER_ID_PREFIX,
@@ -545,6 +546,7 @@ class WebRadioPlayer(Player):
         del action, values
         return [
             CONF_ENTRY_OUTPUT_CODEC_DEFAULT_MP3,
+            CONF_ENTRY_ENABLE_ICY_METADATA_BASIC,
             ConfigEntry(
                 key=CONF_STREAM_URL_LABEL,
                 type=ConfigEntryType.LABEL,
