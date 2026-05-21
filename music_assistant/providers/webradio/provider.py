@@ -29,6 +29,7 @@ from music_assistant.constants import (
 from music_assistant.helpers.audio import (
     calculate_content_length,
     format_icy_metadata_frame,
+    get_bit_rate,
     get_mime_type,
 )
 from music_assistant.helpers.ffmpeg import get_ffmpeg_stream
@@ -375,11 +376,16 @@ class WebRadioProvider(PlayerProvider):
         enable_icy = client_wants_icy and icy_preference != "disabled"
         icy_interval = _ICY_FULL_INTERVAL if icy_preference == "full" else _ICY_STANDARD_INTERVAL
 
+        station_name = _sanitize_header(station.player.display_name)
         headers = {
             **DEFAULT_STREAM_HEADERS,
             **ICY_HEADERS,
             "contentFeatures.dlna.org": DLNA_CONTENT_FEATURES_REALTIME,
             "Content-Type": get_mime_type(output_format.output_format_str),
+            "icy-name": station_name,
+            "icy-description": f"Music Assistant station: {station_name}",
+            "icy-br": str(get_bit_rate(output_format)),
+            "icy-pub": "0",
         }
         if enable_icy:
             headers["icy-metaint"] = str(icy_interval)
@@ -436,6 +442,15 @@ class WebRadioProvider(PlayerProvider):
             self.logger.debug("Web radio listener disconnected: station=%s", station.slug)
 
         return resp
+
+
+def _sanitize_header(value: str) -> str:
+    """
+    Strip characters that would break aiohttp's response header validation.
+
+    :param value: Raw header value, typically a player-configured display name.
+    """
+    return value.replace("\n", " ").replace("\r", " ").replace("\t", " ")
 
 
 def _join_at_live_position(queue: PlayerQueue, start_item: QueueItem) -> None:
