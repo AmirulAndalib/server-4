@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -26,6 +27,7 @@ from music_assistant.constants import (
     ICY_HEADERS,
 )
 from music_assistant.helpers.audio import (
+    calculate_content_length,
     format_icy_metadata_frame,
     get_mime_type,
 )
@@ -64,7 +66,8 @@ class _Station:
     player: WebRadioPlayer
     url_path: str
     unregister_route: Callable[[], None]
-    listener_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    takeover_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    active_listener_task: asyncio.Task[web.StreamResponse] | None = None
 
 
 class WebRadioProvider(PlayerProvider):
@@ -271,22 +274,31 @@ class WebRadioProvider(PlayerProvider):
 
     async def _handle_stream_request(self, request: web.Request) -> web.StreamResponse:
         """
-        Serve the queue flow audio for a station to a single HTTP listener.
+        Serve the queue flow audio for a station, with take-over semantics.
 
         :param request: Inbound aiohttp request.
         """
         station = self._station_for_request(request)
+        my_task = asyncio.current_task()
+        if my_task is None:
+            raise RuntimeError("Web radio handler must run inside an asyncio task")
 
-        if station.listener_lock.locked():
-            raise web.HTTPConflict(
-                reason=(
-                    f"Station {station.slug!r} is already serving a listener. "
-                    "Create a second station for an additional concurrent listener."
-                )
-            )
+        # Browsers and many media clients open several parallel connections to a
+        # stream URL. We can only have one producer per queue, so the newest
+        # listener takes over and the previous one is cancelled cleanly.
+        async with station.takeover_lock:
+            previous = station.active_listener_task
+            if previous is not None and previous is not my_task and not previous.done():
+                previous.cancel()
+                with suppress(asyncio.CancelledError):
+                    await previous
+            station.active_listener_task = my_task
 
-        async with station.listener_lock:
+        try:
             return await self._serve_stream(request, station)
+        finally:
+            if station.active_listener_task is my_task:
+                station.active_listener_task = None
 
     async def _serve_stream(self, request: web.Request, station: _Station) -> web.StreamResponse:
         """
@@ -328,8 +340,10 @@ class WebRadioProvider(PlayerProvider):
         if enable_icy:
             headers["icy-metaint"] = str(icy_interval)
 
+        # Shoutcast/Icecast-style framing: no Content-Length and no chunked
+        # transfer encoding. DEFAULT_STREAM_HEADERS already sets Connection:
+        # close so the body simply runs until the client disconnects.
         resp = web.StreamResponse(status=200, reason="OK", headers=headers)
-        resp.enable_chunked_encoding()
         await resp.prepare(request)
 
         if request.method != "GET":
@@ -342,7 +356,7 @@ class WebRadioProvider(PlayerProvider):
             enable_icy,
         )
 
-        ffmpeg_chunk_size = icy_interval if enable_icy else None
+        ffmpeg_chunk_size = icy_interval if enable_icy else calculate_content_length(output_format)
         try:
             async for chunk in get_ffmpeg_stream(
                 audio_input=self.mass.streams.audio.get_queue_flow_stream(
