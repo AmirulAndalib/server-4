@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from contextlib import suppress
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -49,6 +50,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from music_assistant_models.config_entries import ConfigValueType, ProviderConfig
+    from music_assistant_models.media_items import AudioFormat
     from music_assistant_models.player_queue import PlayerQueue
     from music_assistant_models.provider import ProviderManifest
     from music_assistant_models.queue_item import QueueItem
@@ -58,20 +60,25 @@ if TYPE_CHECKING:
 
 _ICY_FULL_INTERVAL: int = 256_000
 _ICY_STANDARD_INTERVAL: int = 16_384
+# Bounded backlog per listener. Audio chunks are pushed by the producer; if a
+# listener cannot keep up the queue fills, the listener is dropped, and the
+# producer keeps feeding the others.
+_SUBSCRIBER_QUEUE_SIZE: int = 32
+# ICY no-change frame: a single zero byte tells the client "metadata is the
+# same as last time" without resending the full StreamTitle block.
+_ICY_NO_CHANGE_FRAME: bytes = b"\x00"
+# How long a new listener waits for the producer to determine output format
+# before giving up with HTTP 503.
+_PRODUCER_READY_TIMEOUT: float = 10.0
 
 
 @dataclass
-class _ListenerSession:
-    """
-    State shared between a listener handler and incoming take-over requests.
+class _Subscriber:
+    """A single HTTP listener subscribed to a station's broadcast."""
 
-    ``cancelled`` is set by the take-over path to ask the active handler to
-    stop streaming at the next chunk boundary. ``finished`` is set by the
-    handler once it has fully released its ffmpeg pipeline and queue state.
-    """
-
-    cancelled: asyncio.Event = field(default_factory=asyncio.Event)
-    finished: asyncio.Event = field(default_factory=asyncio.Event)
+    queue: asyncio.Queue[bytes | None]
+    want_icy: bool
+    last_metadata_seen: bytes = b""
 
 
 @dataclass
@@ -83,8 +90,20 @@ class _Station:
     player: WebRadioPlayer
     url_path: str
     unregister_route: Callable[[], None]
-    takeover_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    active_session: _ListenerSession | None = None
+    lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    subscribers: set[_Subscriber] = field(default_factory=set)
+    producer_task: asyncio.Task[None] | None = None
+    producer_ready: asyncio.Event = field(default_factory=asyncio.Event)
+    # Cooperative stop flag for the user-stop / pause path. Setting it asks
+    # the producer to exit at the next chunk boundary, which lets ffmpeg's
+    # context manager run its cleanup outside of asyncio task cancellation
+    # (cancelling mid-cleanup races _UnixReadPipeTransport on Python 3.14).
+    stop_event: asyncio.Event = field(default_factory=asyncio.Event)
+    # Filled in by the producer once it has resolved its output config.
+    output_format: AudioFormat | None = None
+    icy_preference: str = "disabled"
+    icy_chunk_size: int = 0
+    current_metadata: bytes = b""
 
 
 class WebRadioProvider(PlayerProvider):
@@ -96,8 +115,10 @@ class WebRadioProvider(PlayerProvider):
     pointing at the station's HTTP URL; whatever the station's queue is
     currently playing becomes the audio broadcast on that URL.
 
-    A station serves one HTTP listener at a time. To stream the same content
-    to multiple devices, create one station per device.
+    A station produces audio through a single shared ffmpeg pipeline and fans
+    the encoded chunks out to every connected HTTP listener. New listeners
+    join the live broadcast; the producer starts on the first listener and
+    stops once the last one disconnects.
     """
 
     def __init__(
@@ -125,12 +146,13 @@ class WebRadioProvider(PlayerProvider):
 
     async def unload(self, is_removed: bool = False) -> None:
         """
-        Unregister all stations on provider unload.
+        Unregister all stations and stop their producers on provider unload.
 
         :param is_removed: True when the provider instance is being removed.
         """
         del is_removed
         for station in list(self._stations.values()):
+            await self._cancel_producer(station)
             station.unregister_route()
             await self.mass.players.unregister(station.player_id)
         self._stations.clear()
@@ -154,6 +176,7 @@ class WebRadioProvider(PlayerProvider):
         if new_names != raw_names:
             self._update_config_value(CONF_STATIONS, new_names)
 
+        await self._cancel_producer(station)
         station.unregister_route()
         del self._stations[station.slug]
         await self.mass.players.unregister(player_id, True)
@@ -194,6 +217,7 @@ class WebRadioProvider(PlayerProvider):
         for slug in list(self._stations):
             if slug not in configured:
                 station = self._stations.pop(slug)
+                await self._cancel_producer(station)
                 station.unregister_route()
                 await self.mass.players.unregister(station.player_id)
 
@@ -232,16 +256,43 @@ class WebRadioProvider(PlayerProvider):
         )
         player.set_stream_url(self._public_url(url_path))
 
-    def stop_active_listener(self, slug: str) -> None:
+    def stop_producer(self, slug: str) -> None:
         """
-        Signal a station's active listener (if any) to disconnect cleanly.
+        Ask a station's producer to stop, terminating the broadcast.
 
-        :param slug: Slug of the station whose active listener should stop.
+        Called from the player's stop()/pause path so dumb receivers stop
+        getting new audio. The producer exits at the next chunk boundary
+        and lets ffmpeg shut down through its context manager rather than
+        being cancelled mid-pipeline. Connected receivers will still drain
+        their own client-side buffer before going silent; that's unavoidable.
+
+        :param slug: Slug of the station whose producer should stop.
         """
         station = self._stations.get(slug)
-        if station is None or station.active_session is None:
+        if station is None:
             return
-        station.active_session.cancelled.set()
+        station.stop_event.set()
+
+    async def _cancel_producer(self, station: _Station) -> None:
+        """
+        Wind down a station's producer, used on provider unload/remove.
+
+        Signals a cooperative stop first and only falls back to a hard task
+        cancel if the producer does not exit promptly.
+        """
+        task = station.producer_task
+        if task is None or task.done():
+            return
+        station.stop_event.set()
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=3.0)
+        except TimeoutError:
+            task.cancel()
+            with suppress(asyncio.CancelledError):
+                await task
+        except asyncio.CancelledError:
+            # propagated from task itself; nothing more to do
+            pass
 
     def refresh_station_route(self, slug: str) -> None:
         """
@@ -297,84 +348,213 @@ class WebRadioProvider(PlayerProvider):
         raise web.HTTPNotFound(reason=f"Unknown web radio station: {request.path}")
 
     # ---------------------------------------------------------------
-    # HTTP stream handler
+    # HTTP stream handler and per-station producer
     # ---------------------------------------------------------------
 
     async def _handle_stream_request(self, request: web.Request) -> web.StreamResponse:
         """
-        Serve the queue flow audio for a station, with take-over semantics.
+        Subscribe an HTTP listener to a station's shared broadcast.
 
         :param request: Inbound aiohttp request.
         """
         station = self._station_for_request(request)
 
-        # Browsers and many media clients open several parallel connections to
-        # a stream URL. There can only be one producer per queue, so the newest
-        # listener wins. We ask the previous handler (if any) to stop at its
-        # next chunk boundary and wait for it to finish releasing its ffmpeg
-        # pipeline before the new handler starts a fresh one. A cooperative
-        # flag is used rather than task cancellation because cancelling a task
-        # mid-ffmpeg-cleanup can race the subprocess transport on Python 3.14.
-        async with station.takeover_lock:
-            previous = station.active_session
-            if previous is not None and not previous.finished.is_set():
-                previous.cancelled.set()
-                try:
-                    await asyncio.wait_for(previous.finished.wait(), timeout=5.0)
-                except TimeoutError:
-                    self.logger.warning(
-                        "Previous listener on station %s did not exit within 5s; proceeding anyway",
-                        station.slug,
-                    )
-            session = _ListenerSession()
-            station.active_session = session
+        if request.method == "HEAD":
+            return _head_response(self._station_codec(station.player_id))
+
+        subscriber = _Subscriber(
+            queue=asyncio.Queue(maxsize=_SUBSCRIBER_QUEUE_SIZE),
+            want_icy=request.headers.get("Icy-MetaData", "") == "1",
+        )
+
+        async with station.lock:
+            station.subscribers.add(subscriber)
+            if station.producer_task is None or station.producer_task.done():
+                station.output_format = None
+                station.current_metadata = b""
+                station.producer_ready.clear()
+                station.stop_event.clear()
+                station.producer_task = self.mass.create_task(self._run_producer(station))
 
         try:
-            return await self._serve_stream(request, station, session)
+            try:
+                await asyncio.wait_for(
+                    station.producer_ready.wait(), timeout=_PRODUCER_READY_TIMEOUT
+                )
+            except TimeoutError as err:
+                raise web.HTTPServiceUnavailable(
+                    reason=f"Station {station.slug!r} did not start in time"
+                ) from err
+            if station.output_format is None:
+                raise web.HTTPServiceUnavailable(
+                    reason=f"Station {station.slug!r} has nothing playing"
+                )
+            return await self._serve_subscriber(request, station, subscriber)
         finally:
-            session.finished.set()
-            if station.active_session is session:
-                station.active_session = None
+            async with station.lock:
+                station.subscribers.discard(subscriber)
 
-    async def _serve_stream(
+    async def _run_producer(self, station: _Station) -> None:
+        """
+        Single shared producer for one station.
+
+        Runs ffmpeg once, broadcasts each encoded chunk to every subscriber.
+        Stops when the last subscriber disconnects.
+        """
+        clean_exit = False
+        try:
+            queue, start_item = self._producer_inputs(station)
+            if queue is None or start_item is None:
+                station.producer_ready.set()
+                return
+
+            _join_at_live_position(queue, start_item)
+
+            flow_pcm_format = await self.mass.streams.audio.select_flow_format(station.player)
+            output_format = await self.mass.streams.audio.get_output_format(
+                output_format_str=station.url_path.rsplit(".", 1)[-1],
+                player=station.player,
+                content_sample_rate=flow_pcm_format.sample_rate,
+                content_bit_depth=flow_pcm_format.bit_depth,
+                media_type=start_item.media_type,
+            )
+
+            icy_preference = str(
+                self.mass.config.get_raw_player_config_value(
+                    station.player_id,
+                    CONF_ENTRY_ENABLE_ICY_METADATA.key,
+                    CONF_ENTRY_ENABLE_ICY_METADATA.default_value,
+                )
+            )
+            chunk_size = _producer_chunk_size(icy_preference, output_format)
+
+            station.output_format = output_format
+            station.icy_preference = icy_preference
+            station.icy_chunk_size = chunk_size
+            station.current_metadata = b""
+            station.producer_ready.set()
+
+            self.logger.debug(
+                "Producer started for station %s: output=%s icy=%s chunk_size=%d",
+                station.slug,
+                output_format.output_format_str,
+                icy_preference,
+                chunk_size,
+            )
+
+            async for chunk in get_ffmpeg_stream(
+                audio_input=self.mass.streams.audio.get_queue_flow_stream(
+                    queue=queue,
+                    start_queue_item=start_item,
+                    pcm_format=flow_pcm_format,
+                ),
+                input_format=flow_pcm_format,
+                output_format=output_format,
+                filter_params=self.mass.streams.audio.get_player_filter_params(
+                    station.player.player_id, flow_pcm_format, output_format
+                ),
+                # near-realtime feed: small initial burst, then natural pacing
+                extra_input_args=["-readrate", "1.1", "-readrate_initial_burst", "5"],
+                chunk_size=chunk_size,
+            ):
+                if icy_preference != "disabled":
+                    title, image_url = _icy_metadata_for_queue(queue, icy_preference)
+                    station.current_metadata = format_icy_metadata_frame(title, image_url)
+
+                slow = self._broadcast_chunk(station, chunk)
+                for sub in slow:
+                    self.logger.debug(
+                        "Dropping slow listener on station %s (queue backlog full)",
+                        station.slug,
+                    )
+                    station.subscribers.discard(sub)
+                    _drain_and_signal(sub)
+
+                # Atomically decide whether to keep producing. The lock keeps
+                # a new subscriber from racing in between the check and the
+                # producer_task=None reset, which would otherwise strand them
+                # waiting for a producer that just finished.
+                if not station.subscribers:
+                    async with station.lock:
+                        if not station.subscribers:
+                            station.producer_task = None
+                            station.producer_ready.clear()
+                            clean_exit = True
+                            return
+
+                # User pressed stop/pause; exit cooperatively so ffmpeg can
+                # clean up without being cancelled mid-pipeline.
+                if station.stop_event.is_set():
+                    break
+            # Fell out of the for loop: either the queue ran out of audio or
+            # stop_event was set. Either way the finally kicks any listeners
+            # that are still attached.
+        finally:
+            # Always unblock subscribers waiting on producer_ready so they
+            # see output_format and either start serving or return 503.
+            if not station.producer_ready.is_set():
+                station.producer_ready.set()
+            if not clean_exit:
+                await self._kick_all_subscribers_and_reset(station)
+            self.logger.debug("Producer ended for station %s", station.slug)
+
+    def _producer_inputs(self, station: _Station) -> tuple[PlayerQueue | None, QueueItem | None]:
+        """Resolve the queue and start item the producer should consume."""
+        queue = self.mass.player_queues.get(station.player_id)
+        if queue is None:
+            return None, None
+        return queue, queue.current_item
+
+    def _broadcast_chunk(self, station: _Station, chunk: bytes) -> list[_Subscriber]:
+        """
+        Push a chunk to every subscriber, returning those whose queues overflowed.
+
+        :param station: The station whose subscribers should receive the chunk.
+        :param chunk: Encoded audio bytes from the ffmpeg pipeline.
+        :return: List of subscribers that could not keep up and should be dropped.
+        """
+        slow: list[_Subscriber] = []
+        for sub in station.subscribers:
+            try:
+                sub.queue.put_nowait(chunk)
+            except asyncio.QueueFull:
+                slow.append(sub)
+        return slow
+
+    async def _kick_all_subscribers_and_reset(self, station: _Station) -> None:
+        """
+        Disconnect every subscriber of a station and reset producer state.
+
+        Used on stop_event / cancel / error paths. The clear of subscribers
+        and the reset of producer_task happen under the same lock acquisition
+        so a fresh subscriber arriving in this window will see producer_task
+        is None and start a new producer instead of joining a dying one.
+        """
+        async with station.lock:
+            subs = list(station.subscribers)
+            station.subscribers.clear()
+            station.producer_task = None
+            station.producer_ready.clear()
+        for sub in subs:
+            _drain_and_signal(sub)
+
+    async def _serve_subscriber(
         self,
         request: web.Request,
         station: _Station,
-        session: _ListenerSession,
+        subscriber: _Subscriber,
     ) -> web.StreamResponse:
         """
-        Stream the active queue contents as a single continuous response.
+        Read audio chunks from the subscriber's queue and write them to the socket.
 
         :param request: Inbound aiohttp request.
         :param station: Resolved station record.
-        :param session: Per-listener session used to receive a cooperative
-            take-over signal from a later request.
+        :param subscriber: Subscription belonging to this connection.
         """
-        player = station.player
-        queue = self.mass.player_queues.get(station.player_id)
-        start_item = queue.current_item if queue else None
-        if queue is None or start_item is None:
-            raise web.HTTPServiceUnavailable(reason=f"Station {station.slug!r} has nothing playing")
+        output_format = station.output_format
+        assert output_format is not None  # producer_ready guarantees this
 
-        _join_at_live_position(queue, start_item)
-
-        flow_pcm_format = await self.mass.streams.audio.select_flow_format(player)
-        output_format = await self.mass.streams.audio.get_output_format(
-            output_format_str=station.url_path.rsplit(".", 1)[-1],
-            player=player,
-            content_sample_rate=flow_pcm_format.sample_rate,
-            content_bit_depth=flow_pcm_format.bit_depth,
-            media_type=start_item.media_type,
-        )
-
-        icy_preference = self.mass.config.get_raw_player_config_value(
-            station.player_id,
-            CONF_ENTRY_ENABLE_ICY_METADATA.key,
-            CONF_ENTRY_ENABLE_ICY_METADATA.default_value,
-        )
-        client_wants_icy = request.headers.get("Icy-MetaData", "") == "1"
-        enable_icy = client_wants_icy and icy_preference != "disabled"
-        icy_interval = _ICY_FULL_INTERVAL if icy_preference == "full" else _ICY_STANDARD_INTERVAL
+        enable_icy = subscriber.want_icy and station.icy_preference != "disabled"
 
         station_name = _sanitize_header(station.player.display_name)
         headers = {
@@ -388,7 +568,7 @@ class WebRadioProvider(PlayerProvider):
             "icy-pub": "0",
         }
         if enable_icy:
-            headers["icy-metaint"] = str(icy_interval)
+            headers["icy-metaint"] = str(station.icy_chunk_size)
 
         # Shoutcast/Icecast-style framing: no Content-Length and no chunked
         # transfer encoding. DEFAULT_STREAM_HEADERS already sets Connection:
@@ -396,34 +576,17 @@ class WebRadioProvider(PlayerProvider):
         resp = web.StreamResponse(status=200, reason="OK", headers=headers)
         await resp.prepare(request)
 
-        if request.method != "GET":
-            return resp
-
         self.logger.debug(
-            "Web radio listener connected: station=%s output=%s icy=%s",
+            "Listener subscribed: station=%s output=%s icy=%s",
             station.slug,
             output_format.output_format_str,
             enable_icy,
         )
 
-        ffmpeg_chunk_size = icy_interval if enable_icy else calculate_content_length(output_format)
         try:
-            async for chunk in get_ffmpeg_stream(
-                audio_input=self.mass.streams.audio.get_queue_flow_stream(
-                    queue=queue,
-                    start_queue_item=start_item,
-                    pcm_format=flow_pcm_format,
-                ),
-                input_format=flow_pcm_format,
-                output_format=output_format,
-                filter_params=self.mass.streams.audio.get_player_filter_params(
-                    player.player_id, flow_pcm_format, output_format
-                ),
-                # near-realtime feed: small initial burst, then natural pacing
-                extra_input_args=["-readrate", "1.1", "-readrate_initial_burst", "5"],
-                chunk_size=ffmpeg_chunk_size,
-            ):
-                if session.cancelled.is_set():
+            while True:
+                chunk = await subscriber.queue.get()
+                if chunk is None:
                     break
                 try:
                     await resp.write(chunk)
@@ -433,15 +596,63 @@ class WebRadioProvider(PlayerProvider):
                 if not enable_icy:
                     continue
 
-                title, image_url = _icy_metadata_for_queue(queue, icy_preference)
+                current = station.current_metadata
+                if current and current != subscriber.last_metadata_seen:
+                    frame = current
+                    subscriber.last_metadata_seen = current
+                else:
+                    frame = _ICY_NO_CHANGE_FRAME
                 try:
-                    await resp.write(format_icy_metadata_frame(title, image_url))
+                    await resp.write(frame)
                 except (BrokenPipeError, ConnectionResetError, ConnectionError):
                     break
         finally:
-            self.logger.debug("Web radio listener disconnected: station=%s", station.slug)
+            self.logger.debug("Listener unsubscribed: station=%s", station.slug)
 
         return resp
+
+
+def _producer_chunk_size(icy_preference: str, output_format: AudioFormat) -> int:
+    """
+    Pick the producer's encoded-chunk size.
+
+    With ICY enabled, the chunk size doubles as the icy-metaint value, so the
+    listener's metaint boundary aligns with each chunk we hand out. With ICY
+    disabled, we pick a roughly one-second chunk for efficient streaming.
+
+    :param icy_preference: Per-station ICY preference value.
+    :param output_format: Encoded output format.
+    """
+    if icy_preference == "full":
+        return _ICY_FULL_INTERVAL
+    if icy_preference == "basic":
+        return _ICY_STANDARD_INTERVAL
+    return calculate_content_length(output_format)
+
+
+def _head_response(codec: str) -> web.Response:
+    """
+    Build the minimal response for a HEAD probe.
+
+    :param codec: Configured output codec for the station, e.g. ``"mp3"``.
+    """
+    headers = {**DEFAULT_STREAM_HEADERS, "Content-Type": get_mime_type(codec)}
+    return web.Response(status=200, headers=headers)
+
+
+def _drain_and_signal(subscriber: _Subscriber) -> None:
+    """
+    Drain a subscriber's queue and post the end-of-stream sentinel.
+
+    :param subscriber: Subscriber to disconnect.
+    """
+    while not subscriber.queue.empty():
+        try:
+            subscriber.queue.get_nowait()
+        except asyncio.QueueEmpty:
+            break
+    with suppress(asyncio.QueueFull):
+        subscriber.queue.put_nowait(None)
 
 
 def _sanitize_header(value: str) -> str:
@@ -458,8 +669,9 @@ def _join_at_live_position(queue: PlayerQueue, start_item: QueueItem) -> None:
     Seek the upcoming flow stream into the current item's live position.
 
     The station's elapsed_time is wallclock-tracked from ``play_media``, so by
-    the time a new listener (re)connects, ``queue.elapsed_time`` reflects how
-    far into the current track the station would be if playback were never
+    the time a fresh producer starts (after the previous one ended because
+    all listeners had disconnected), ``queue.elapsed_time`` reflects how far
+    into the current track the station would be if playback were never
     interrupted. We mutate the start item's ``streamdetails.seek_position`` so
     the first track of the new flow stream resumes from there instead of
     restarting. Subsequent tracks load with fresh streamdetails and are
@@ -572,8 +784,8 @@ class WebRadioPlayer(Player):
                 ),
                 description=(
                     "Point your dumb radio, VLC, or browser at this URL to "
-                    "tune into the station. Only one listener at a time is "
-                    "supported per station."
+                    "tune into the station. Multiple listeners can connect "
+                    "to the same station and will hear the live broadcast."
                 ),
             ),
         ]
@@ -618,11 +830,11 @@ class WebRadioPlayer(Player):
         self.update_state()
 
     async def stop(self) -> None:
-        """Stop playback and terminate the active listener, if any."""
+        """Stop playback and terminate the active broadcast, if any."""
         # MA falls back to stop() when the user pauses a player without PAUSE
-        # support, so this is also the pause-button code path. We must close
-        # the broadcast upstream here; the dumb receiver will then run out
-        # of its own client-side buffer instead of continuing forever.
+        # support, so this is also the pause-button code path. Cancelling the
+        # producer kicks every connected listener; their receivers will drain
+        # their own client-side buffer and then go silent.
         self._attr_playback_state = PlaybackState.IDLE
         self._attr_current_media = None
         self._attr_elapsed_time = None
@@ -630,4 +842,4 @@ class WebRadioPlayer(Player):
         self.update_state()
         provider = self.provider
         if isinstance(provider, WebRadioProvider):
-            provider.stop_active_listener(self._station_slug)
+            provider.stop_producer(self._station_slug)
