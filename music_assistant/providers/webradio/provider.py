@@ -230,6 +230,17 @@ class WebRadioProvider(PlayerProvider):
         )
         player.set_stream_url(self._public_url(url_path))
 
+    def stop_active_listener(self, slug: str) -> None:
+        """
+        Signal a station's active listener (if any) to disconnect cleanly.
+
+        :param slug: Slug of the station whose active listener should stop.
+        """
+        station = self._stations.get(slug)
+        if station is None or station.active_session is None:
+            return
+        station.active_session.cancelled.set()
+
     def refresh_station_route(self, slug: str) -> None:
         """
         Re-register a station's HTTP route after its codec config changed.
@@ -576,9 +587,16 @@ class WebRadioPlayer(Player):
         self.update_state()
 
     async def stop(self) -> None:
-        """Stop playback, clear current media and reset the elapsed clock."""
+        """Stop playback and terminate the active listener, if any."""
+        # MA falls back to stop() when the user pauses a player without PAUSE
+        # support, so this is also the pause-button code path. We must close
+        # the broadcast upstream here; the dumb receiver will then run out
+        # of its own client-side buffer instead of continuing forever.
         self._attr_playback_state = PlaybackState.IDLE
         self._attr_current_media = None
         self._attr_elapsed_time = None
         self._attr_elapsed_time_last_updated = None
         self.update_state()
+        provider = self.provider
+        if isinstance(provider, WebRadioProvider):
+            provider.stop_active_listener(self._station_slug)
