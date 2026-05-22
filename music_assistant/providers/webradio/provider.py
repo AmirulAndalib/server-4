@@ -835,14 +835,6 @@ class WebRadioPlayer(Player):
                     if self._stream_url
                     else "Stream URL: (unavailable)"
                 ),
-                description=(
-                    "Point your web radio, VLC, or browser at this URL to "
-                    "tune into the station. Multiple listeners can connect "
-                    "and will hear the same live broadcast. Audio is only "
-                    "sent while the queue is playing; pressing pause or "
-                    "stop in Music Assistant ends the broadcast and "
-                    "disconnects listeners. Reconnect once playback resumes."
-                ),
             ),
         ]
 
