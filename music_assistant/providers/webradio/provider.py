@@ -858,12 +858,11 @@ class WebRadioPlayer(Player):
         self._attr_playback_state = PlaybackState.PLAYING
         self._attr_elapsed_time = 0
         self._attr_elapsed_time_last_updated = time.time()
-        # The queue is consumed via a flow stream even when no listener is
-        # connected yet, so set the runtime flag now. Without this MA's queue
-        # controller treats the queue as non-flow and tries to enqueue the
-        # next track via PlayerFeature.ENQUEUE, which this player doesn't
-        # support. get_queue_flow_stream re-sets the same flag once an
-        # actual listener attaches.
+        # Pre-set queue.flow_mode so the queue controller does not schedule
+        # enqueue_next_media during the listener-not-yet-connected window
+        # (PlayerFeature.ENQUEUE is intentionally not advertised by this
+        # player). get_queue_flow_stream sets the same flag once a listener
+        # attaches and the producer runs for real.
         queue = self.mass.player_queues.get(self.player_id)
         if queue is not None:
             queue.flow_mode = True
