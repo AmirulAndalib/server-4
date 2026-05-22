@@ -17,7 +17,7 @@ from music_assistant_models.enums import (
     ProviderFeature,
 )
 from music_assistant_models.errors import SetupFailedError
-from music_assistant_models.player import DeviceInfo, PlayerMedia
+from music_assistant_models.player import DeviceInfo, PlayerMedia, PlayerSource
 
 from music_assistant.constants import (
     CONF_ENTRY_ENABLE_ICY_METADATA,
@@ -797,6 +797,19 @@ class WebRadioPlayer(Player):
             model="Web Radio Station",
             manufacturer="Music Assistant",
         )
+        # Override the auto-injected queue source so the UI gates seek off:
+        # seeking a live broadcast is not meaningful here. Play/pause and
+        # next/previous remain available.
+        self._attr_source_list = [
+            PlayerSource(
+                id=player_id,
+                name="Music Assistant Queue",
+                passive=False,
+                can_play_pause=True,
+                can_seek=False,
+                can_next_previous=True,
+            ),
+        ]
 
     @property
     def requires_flow_mode(self) -> bool:
