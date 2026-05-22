@@ -878,10 +878,7 @@ class WebRadioPlayer(Player):
 
     async def stop(self) -> None:
         """Stop playback and terminate the active broadcast, if any."""
-        # MA falls back to stop() when the user pauses a player without PAUSE
-        # support, so this is also the pause-button code path. Cancelling the
-        # producer kicks every connected listener; their receivers will drain
-        # their own client-side buffer and then go silent.
+        # Also the pause path: MA falls back to stop() when PAUSE is not advertised.
         self._attr_playback_state = PlaybackState.IDLE
         self._attr_current_media = None
         self._attr_elapsed_time = None
