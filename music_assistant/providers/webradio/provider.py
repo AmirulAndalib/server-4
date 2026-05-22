@@ -677,14 +677,21 @@ def _join_at_live_position(queue: PlayerQueue, start_item: QueueItem) -> None:
     restarting. Subsequent tracks load with fresh streamdetails and are
     unaffected.
 
+    This function is authoritative for ``streamdetails.seek_position``: it
+    always writes either the live position or 0, never leaves a stale value
+    behind from a previous producer run.
+
     :param queue: Active queue for the station.
     :param start_item: Queue item from which the flow stream will start.
     """
     streamdetails = start_item.streamdetails
-    if streamdetails is None or not streamdetails.allow_seek or not streamdetails.duration:
+    if streamdetails is None or not streamdetails.allow_seek:
         return
     seek_seconds = int(queue.elapsed_time or 0)
-    if seek_seconds <= 0 or seek_seconds >= streamdetails.duration:
+    if seek_seconds <= 0 or not streamdetails.duration or seek_seconds >= streamdetails.duration:
+        # No valid mid-track position to join at. Clear any stale value
+        # written by an earlier producer so ffmpeg starts at the beginning.
+        streamdetails.seek_position = 0
         return
     streamdetails.seek_position = seek_seconds
 
