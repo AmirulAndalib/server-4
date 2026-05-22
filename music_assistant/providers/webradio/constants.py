@@ -20,10 +20,10 @@ URL_PATH_PREFIX: Final[str] = "/webradio/"
 CONF_STREAM_URL_LABEL: Final[str] = "stream_url"
 """Per-player config key for the read-only URL display entry."""
 
-# Web radio stations exist specifically to advertise track titles to dumb
-# clients, so ICY metadata is on by default here (the platform-wide default
-# is "disabled" because most MA players are smart receivers that already
-# know what they are playing).
-CONF_ENTRY_ENABLE_ICY_METADATA_BASIC: Final[ConfigEntry] = ConfigEntry.from_dict(
-    {**CONF_ENTRY_ENABLE_ICY_METADATA.to_dict(), "default_value": "basic"}
+# Override the platform-wide CONF_ENTRY_ENABLE_ICY_METADATA default for web
+# radio players: stations exist to advertise track titles to dumb clients,
+# so ICY is on by default in the "full" profile (basic StreamTitle plus the
+# track's image URL via StreamURL).
+CONF_ENTRY_ENABLE_ICY_METADATA_FULL: Final[ConfigEntry] = ConfigEntry.from_dict(
+    {**CONF_ENTRY_ENABLE_ICY_METADATA.to_dict(), "default_value": "full"}
 )
