@@ -102,25 +102,7 @@ class _Station:
 
 
 class WebRadioProvider(PlayerProvider):
-    """
-    Provider that publishes one HTTP audio stream per configured "station".
-
-    Each station appears in Music Assistant as a virtual player with its own
-    queue. Dumb internet-radio devices (or VLC, a browser, etc.) tune in by
-    pointing at the station's HTTP URL; whatever the station's queue is
-    currently playing becomes the audio broadcast on that URL.
-
-    A station produces audio through a single shared ffmpeg pipeline and fans
-    the encoded chunks out to every connected HTTP listener. New listeners
-    join the live broadcast; the producer starts on the first listener and
-    stops once the last one disconnects.
-
-    Behaviour mirrors a regular streaming radio station: nothing is sent
-    while the queue is stopped, paused or empty. PAUSE is intentionally not
-    advertised so MA's pause action falls back to stop; both terminate the
-    broadcast and disconnect listeners. We never stream silence to keep an
-    otherwise idle station "alive".
-    """
+    """Player provider that publishes each configured station as an HTTP audio stream."""
 
     def __init__(
         self,
