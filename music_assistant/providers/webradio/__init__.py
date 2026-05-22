@@ -2,9 +2,16 @@
 Web Radio Broadcast player provider for Music Assistant.
 
 Publishes each configured "station" as a virtual MA player whose queue is
-served on a stable HTTP URL. Dumb internet-radio devices, VLC, browsers and
-similar clients can tune in directly by URL without going through Home
-Assistant or the MPD add-on.
+served on a stable HTTP URL using the Shoutcast/ICY protocol. Dumb internet-
+radio devices, VLC, browsers and similar clients can tune in directly by URL
+without going through Home Assistant or the MPD add-on.
+
+Behaviour matches a regular streaming radio station: audio is broadcast only
+while the queue is playing. Stop and pause both end the broadcast (this
+player provider does not advertise PAUSE, so MA's pause falls back to stop);
+the queue running out of items also ends it naturally. The producer ffmpeg
+pipeline starts on the first listener and shuts down once the last listener
+disconnects, so an idle station consumes no resources.
 """
 
 from __future__ import annotations
@@ -50,9 +57,9 @@ async def get_config_entries(
             label="Stations",
             description=(
                 "One station per line. Each station appears as a virtual MA "
-                "player with its own queue, served on its own HTTP URL. "
-                "Renaming a station changes its URL; the URL is shown on "
-                "the station's player settings page."
+                "player with its own queue, served on its own HTTP URL. The "
+                "URL is shown on each station's player settings page. "
+                "Renaming a station changes its URL."
             ),
             default_value=[],
             required=False,

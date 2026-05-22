@@ -119,6 +119,12 @@ class WebRadioProvider(PlayerProvider):
     the encoded chunks out to every connected HTTP listener. New listeners
     join the live broadcast; the producer starts on the first listener and
     stops once the last one disconnects.
+
+    Behaviour mirrors a regular streaming radio station: nothing is sent
+    while the queue is stopped, paused or empty. PAUSE is intentionally not
+    advertised so MA's pause action falls back to stop; both terminate the
+    broadcast and disconnect listeners. We never stream silence to keep an
+    otherwise idle station "alive".
     """
 
     def __init__(
@@ -790,9 +796,12 @@ class WebRadioPlayer(Player):
                     else "Stream URL: (unavailable)"
                 ),
                 description=(
-                    "Point your dumb radio, VLC, or browser at this URL to "
+                    "Point your web radio, VLC, or browser at this URL to "
                     "tune into the station. Multiple listeners can connect "
-                    "to the same station and will hear the live broadcast."
+                    "and will hear the same live broadcast. Audio is only "
+                    "sent while the queue is playing; pressing pause or "
+                    "stop in Music Assistant ends the broadcast and "
+                    "disconnects listeners. Reconnect once playback resumes."
                 ),
             ),
         ]
