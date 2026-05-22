@@ -72,7 +72,7 @@ _ICY_NO_CHANGE_FRAME: bytes = b"\x00"
 _PRODUCER_READY_TIMEOUT: float = 10.0
 
 
-@dataclass
+@dataclass(eq=False)
 class _Subscriber:
     """A single HTTP listener subscribed to a station's broadcast."""
 
