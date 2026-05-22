@@ -404,8 +404,11 @@ class WebRadioProvider(PlayerProvider):
         """
         Single shared producer for one station.
 
-        Runs ffmpeg once, broadcasts each encoded chunk to every subscriber.
-        Stops when the last subscriber disconnects.
+        Runs ffmpeg once per queue session and broadcasts every encoded chunk
+        to every subscriber. When the user skips, MA bumps the queue's
+        session_id and ``get_queue_flow_stream`` exits early; we then drop
+        the ffmpeg pipeline and start a fresh one on the new current item
+        without disconnecting any listener.
         """
         clean_exit = False
         try:
@@ -413,8 +416,6 @@ class WebRadioProvider(PlayerProvider):
             if queue is None or start_item is None:
                 station.producer_ready.set()
                 return
-
-            _join_at_live_position(queue, start_item)
 
             flow_pcm_format = await self.mass.streams.audio.select_flow_format(station.player)
             output_format = await self.mass.streams.audio.get_output_format(
@@ -448,53 +449,52 @@ class WebRadioProvider(PlayerProvider):
                 chunk_size,
             )
 
-            async for chunk in get_ffmpeg_stream(
-                audio_input=self.mass.streams.audio.get_queue_flow_stream(
+            # Outer loop: one iteration per queue session. We re-enter on
+            # skip (queue.session_id changes) so a manual track change does
+            # not disconnect listeners.
+            while True:
+                queue = self.mass.player_queues.get(station.player_id)
+                start_item = queue.current_item if queue else None
+                if queue is None or start_item is None:
+                    break  # natural end: nothing to play
+                session_id_at_start = queue.session_id
+                _join_at_live_position(queue, start_item)
+
+                exit_reason = await self._run_one_flow_session(
+                    station=station,
                     queue=queue,
-                    start_queue_item=start_item,
-                    pcm_format=flow_pcm_format,
-                ),
-                input_format=flow_pcm_format,
-                output_format=output_format,
-                filter_params=self.mass.streams.audio.get_player_filter_params(
-                    station.player.player_id, flow_pcm_format, output_format
-                ),
-                # near-realtime feed: small initial burst, then natural pacing
-                extra_input_args=["-readrate", "1.1", "-readrate_initial_burst", "5"],
-                chunk_size=chunk_size,
-            ):
-                if icy_preference != "disabled":
-                    title, image_url = _icy_metadata_for_queue(queue, icy_preference)
-                    station.current_metadata = format_icy_metadata_frame(title, image_url)
+                    start_item=start_item,
+                    flow_pcm_format=flow_pcm_format,
+                    output_format=output_format,
+                    icy_preference=icy_preference,
+                    chunk_size=chunk_size,
+                )
 
-                slow = self._broadcast_chunk(station, chunk)
-                for sub in slow:
-                    self.logger.debug(
-                        "Dropping slow listener on station %s (queue backlog full)",
-                        station.slug,
-                    )
-                    station.subscribers.discard(sub)
-                    _drain_and_signal(sub)
-
-                # Atomically decide whether to keep producing. The lock keeps
-                # a new subscriber from racing in between the check and the
-                # producer_task=None reset, which would otherwise strand them
-                # waiting for a producer that just finished.
-                if not station.subscribers:
+                if exit_reason == "stopped":
+                    break
+                if exit_reason == "no_subscribers":
                     async with station.lock:
                         if not station.subscribers:
                             station.producer_task = None
                             station.producer_ready.clear()
                             clean_exit = True
                             return
+                    # a subscriber raced back in while we were exiting; loop
+                    # again to keep serving them
+                    continue
 
-                # User pressed stop/pause; exit cooperatively so ffmpeg can
-                # clean up without being cancelled mid-pipeline.
-                if station.stop_event.is_set():
+                # exit_reason == "ended": check whether it was a manual skip
+                # (queue.session_id moved on while we were streaming) or the
+                # queue actually ran out.
+                queue = self.mass.player_queues.get(station.player_id)
+                if queue is None or queue.current_item is None:
                     break
-            # Fell out of the for loop: either the queue ran out of audio or
-            # stop_event was set. Either way the finally kicks any listeners
-            # that are still attached.
+                if queue.session_id == session_id_at_start:
+                    break  # same session reached the end
+                self.logger.debug(
+                    "Producer for station %s restarting on new queue session",
+                    station.slug,
+                )
         finally:
             # Always unblock subscribers waiting on producer_ready so they
             # see output_format and either start serving or return 503.
@@ -503,6 +503,61 @@ class WebRadioProvider(PlayerProvider):
             if not clean_exit:
                 await self._kick_all_subscribers_and_reset(station)
             self.logger.debug("Producer ended for station %s", station.slug)
+
+    async def _run_one_flow_session(
+        self,
+        *,
+        station: _Station,
+        queue: PlayerQueue,
+        start_item: QueueItem,
+        flow_pcm_format: AudioFormat,
+        output_format: AudioFormat,
+        icy_preference: str,
+        chunk_size: int,
+    ) -> str:
+        """
+        Drive one ffmpeg flow stream pipeline to completion.
+
+        :return: One of ``"stopped"`` (user pressed stop/pause),
+            ``"no_subscribers"`` (last listener left), or ``"ended"``
+            (ffmpeg pipeline finished — either the queue ran out of audio
+            or the queue session was superseded by a skip).
+        """
+        async for chunk in get_ffmpeg_stream(
+            audio_input=self.mass.streams.audio.get_queue_flow_stream(
+                queue=queue,
+                start_queue_item=start_item,
+                pcm_format=flow_pcm_format,
+            ),
+            input_format=flow_pcm_format,
+            output_format=output_format,
+            filter_params=self.mass.streams.audio.get_player_filter_params(
+                station.player.player_id, flow_pcm_format, output_format
+            ),
+            # near-realtime feed: small initial burst, then natural pacing
+            extra_input_args=["-readrate", "1.1", "-readrate_initial_burst", "5"],
+            chunk_size=chunk_size,
+        ):
+            if icy_preference != "disabled":
+                title, image_url = _icy_metadata_for_queue(queue, icy_preference)
+                station.current_metadata = format_icy_metadata_frame(title, image_url)
+
+            slow = self._broadcast_chunk(station, chunk)
+            for sub in slow:
+                self.logger.debug(
+                    "Dropping slow listener on station %s (queue backlog full)",
+                    station.slug,
+                )
+                station.subscribers.discard(sub)
+                _drain_and_signal(sub)
+
+            if not station.subscribers:
+                return "no_subscribers"
+
+            if station.stop_event.is_set():
+                return "stopped"
+
+        return "stopped" if station.stop_event.is_set() else "ended"
 
     def _producer_inputs(self, station: _Station) -> tuple[PlayerQueue | None, QueueItem | None]:
         """Resolve the queue and start item the producer should consume."""
