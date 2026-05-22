@@ -538,9 +538,18 @@ class WebRadioProvider(PlayerProvider):
             extra_input_args=["-readrate", "1.1", "-readrate_initial_burst", "5"],
             chunk_size=chunk_size,
         ):
+            # Skip any short chunk. iter_chunked returns sub-chunk_size data only
+            # at ffmpeg EOF, and emitting one would desync VLC's icy-metaint
+            # counter for the rest of the connection.
+            if len(chunk) < chunk_size:
+                continue
+
             if icy_preference != "disabled":
                 title, image_url = _icy_metadata_for_queue(queue, icy_preference)
-                station.current_metadata = format_icy_metadata_frame(title, image_url)
+                new_metadata = format_icy_metadata_frame(title, image_url)
+                if new_metadata != station.current_metadata:
+                    self.logger.debug("Station %s ICY metadata: %s", station.slug, title)
+                    station.current_metadata = new_metadata
 
             slow = self._broadcast_chunk(station, chunk)
             for sub in slow:
