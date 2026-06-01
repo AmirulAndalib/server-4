@@ -554,7 +554,7 @@ class WebRadioProvider(PlayerProvider):
             # let their buffer grow past TCP backpressure. Stations are
             # served to clients that bring their own buffer, so we don't
             # need the over-provisioning.
-            extra_input_args=["-readrate", "1.0"],
+            extra_input_args=["-readrate", "1.0", "-readrate_initial_burst", "5"],
             chunk_size=chunk_size,
         ):
             # iter_chunked yields a short chunk only at ffmpeg EOF. Emitting
