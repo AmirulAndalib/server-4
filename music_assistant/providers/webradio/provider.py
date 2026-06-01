@@ -544,14 +544,15 @@ class WebRadioProvider(PlayerProvider):
             ),
             # 1.0x avoids long-broadcast drift (core uses 1.1 which clients
             # absorb past TCP backpressure). 2s burst per restart cushions
-            # VLC across the producer-restart gap on skip; bigger bursts
-            # close the gap further at the cost of more skip latency.
+            # listeners across the producer-restart gap on skip; bigger
+            # bursts close the gap further at the cost of more skip latency.
             extra_input_args=["-readrate", "1.0", "-readrate_initial_burst", "2"],
             chunk_size=chunk_size,
         ):
             # iter_chunked yields a short chunk only at ffmpeg EOF. Emitting
-            # one would desync VLC's icy-metaint counter for the rest of the
-            # connection, so drop it (we lose <1s of audio at session end).
+            # one would desync the client's icy-metaint counter for the rest
+            # of the connection, so drop it (we lose <1s of audio at session
+            # end).
             if len(chunk) < chunk_size:
                 continue
 
