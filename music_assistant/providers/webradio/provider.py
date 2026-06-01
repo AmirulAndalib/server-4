@@ -20,7 +20,6 @@ from music_assistant_models.errors import SetupFailedError
 from music_assistant_models.player import DeviceInfo, PlayerMedia, PlayerSource
 
 from music_assistant.constants import (
-    CONF_ENTRY_ENABLE_ICY_METADATA,
     CONF_ENTRY_OUTPUT_CODEC_DEFAULT_MP3,
     CONF_OUTPUT_CODEC,
     DEFAULT_STREAM_HEADERS,
@@ -398,8 +397,8 @@ class WebRadioProvider(PlayerProvider):
             icy_preference = str(
                 self.mass.config.get_raw_player_config_value(
                     station.player_id,
-                    CONF_ENTRY_ENABLE_ICY_METADATA.key,
-                    CONF_ENTRY_ENABLE_ICY_METADATA.default_value,
+                    CONF_ENTRY_ENABLE_ICY_METADATA_FULL.key,
+                    CONF_ENTRY_ENABLE_ICY_METADATA_FULL.default_value,
                 )
             )
             chunk_size = _producer_chunk_size(icy_preference, output_format)
