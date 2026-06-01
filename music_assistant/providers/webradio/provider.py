@@ -407,11 +407,8 @@ class WebRadioProvider(PlayerProvider):
         """
         clean_exit = False
         try:
-            # Resolve the first start_item from the latest PlayerMedia the
-            # queue handed us via play_media. We never read queue.current_item
-            # ourselves: the queue controller mutates it in the middle of a
-            # PLAY_NOW/seek (session_id bumps before current_item updates),
-            # and PlayerMedia gives us a stable, race-free snapshot.
+            # Source from the latest PlayerMedia handed to play_media;
+            # queue.current_item races queue.session_id during PLAY_NOW/seek.
             queue, start_item = self._resolve_pending_media(station)
             if queue is None or start_item is None:
                 station.producer_ready.set()
