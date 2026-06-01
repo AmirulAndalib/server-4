@@ -548,13 +548,13 @@ class WebRadioProvider(PlayerProvider):
             filter_params=self.mass.streams.audio.get_player_filter_params(
                 station.player.player_id, flow_pcm_format, output_format
             ),
-            # Exact real-time pacing. 1.1x with an initial burst (the value
-            # used by the core flow handler) accumulates several seconds of
-            # drift over a long-running broadcast as VLC and similar clients
-            # let their buffer grow past TCP backpressure. Stations are
-            # served to clients that bring their own buffer, so we don't
-            # need the over-provisioning.
-            extra_input_args=["-readrate", "1.0"],
+            # 1.0x steady-state pacing keeps MA UI and listeners in lock-step
+            # over long broadcasts (-readrate 1.1 lets VLC's buffer grow and
+            # drifts a few seconds per hour). A small initial burst lets each
+            # ffmpeg restart fill its first chunk near-instantly instead of
+            # waiting ~500ms wallclock, hiding the producer-restart gap on
+            # PLAY_NOW / skip from VLC.
+            extra_input_args=["-readrate", "1.0", "-readrate_initial_burst", "1"],
             chunk_size=chunk_size,
         ):
             # iter_chunked yields a short chunk only at ffmpeg EOF. Emitting
