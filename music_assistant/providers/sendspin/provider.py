@@ -33,7 +33,10 @@ from music_assistant.helpers.util import format_ip_for_url
 from music_assistant.mass import MusicAssistant
 from music_assistant.models.player import Player
 from music_assistant.models.player_provider import PlayerProvider
-from music_assistant.providers.sendspin.constants import CONF_SENDSPIN_STATIC_DELAY
+from music_assistant.providers.sendspin.constants import (
+    CONF_DISABLE_WEB_PLAYERS,
+    CONF_SENDSPIN_STATIC_DELAY,
+)
 from music_assistant.providers.sendspin.player import (
     SendspinBasePlayer,
     SendspinPlayer,
@@ -94,6 +97,7 @@ class SendspinProvider(PlayerProvider):
     _client_event_versions: dict[str, int]
     _client_event_task_counts: dict[str, int]
     _manual_ip_config: tuple[str, ...]
+    _disable_web_players: bool
     _unloading: bool
 
     def __init__(
@@ -104,6 +108,7 @@ class SendspinProvider(PlayerProvider):
         # Handle config option for manual IP's
         manual_ip_config = cast("list[str]", config.get_value(CONF_ENTRY_MANUAL_DISCOVERY_IPS.key))
         self._manual_ip_config = tuple(address for address in manual_ip_config if address.strip())
+        self._disable_web_players = cast("bool", config.get_value(CONF_DISABLE_WEB_PLAYERS, False))
         self.server_api = SendspinServer(
             self.mass.loop, mass.server_id, "Music Assistant", self.mass.http_session
         )
@@ -316,6 +321,25 @@ class SendspinProvider(PlayerProvider):
             player.static_delay_default_ms = static_delay_default_ms
         return player
 
+    async def _await_client_hello(self, client_id: str) -> SendspinClient | None:
+        """
+        Wait for a client's hello handshake to complete.
+
+        :param client_id: The client to wait for.
+        :return: The live SendspinClient once its info is available, or None if the
+            client disconnected or did not complete the handshake in time.
+        """
+        sendspin_client = self.server_api.get_client(client_id)
+        if sendspin_client is None:
+            self.logger.debug("Client %s disconnected before hello completed", client_id)
+            return None
+        for _ in range(50):  # Wait up to 5 seconds
+            if sendspin_client._info is not None:
+                return sendspin_client
+            await asyncio.sleep(0.1)
+        self.logger.warning("Client %s hello not received within timeout", client_id)
+        return None
+
     async def _handle_client_added(self, client_id: str, event_version: int) -> None:
         """Handle a new client connection asynchronously."""
         try:
@@ -337,19 +361,10 @@ class SendspinProvider(PlayerProvider):
                 if not self._is_current_client_event(client_id, event_version):
                     self.logger.debug("Skipping stale add event for %s after waiting", client_id)
                     return
-            # Check if client still exists (may have disconnected while waiting)
-            sendspin_client = self.server_api.get_client(client_id)
+            # Check if client still exists and wait for its hello to complete
+            # (ClientAddedEvent fires before the hello handshake finishes).
+            sendspin_client = await self._await_client_hello(client_id)
             if sendspin_client is None:
-                self.logger.debug("Client %s disconnected before hello completed", client_id)
-                return
-            # Wait for client hello to be processed (info becomes available)
-            # ClientAddedEvent fires before the hello handshake completes
-            for _ in range(50):  # Wait up to 5 seconds
-                if sendspin_client._info is not None:
-                    break
-                await asyncio.sleep(0.1)
-            else:
-                self.logger.warning("Client %s hello not received within timeout", client_id)
                 return
             if not self._is_current_client_event(client_id, event_version):
                 self.logger.debug("Skipping stale add event for %s", client_id)
@@ -375,6 +390,16 @@ class SendspinProvider(PlayerProvider):
             player = self._create_player(
                 client_id, sendspin_client, existing_player, bridge_hello_snapshot
             )
+            if (
+                self._disable_web_players
+                and isinstance(player, SendspinPlayer)
+                and player.is_web_player
+            ):
+                self.logger.debug(
+                    "Skipping web/app player %s: local web players are disabled", client_id
+                )
+                player._unsubscribe_client_callbacks()
+                return
             for id_type, id_value in preserved_identifiers.items():
                 player.device_info.add_identifier(id_type, id_value)
             self.logger.debug("Client %s connected", client_id)
