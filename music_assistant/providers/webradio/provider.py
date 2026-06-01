@@ -542,16 +542,10 @@ class WebRadioProvider(PlayerProvider):
             filter_params=self.mass.streams.audio.get_player_filter_params(
                 station.player.player_id, flow_pcm_format, output_format
             ),
-            # Exact real-time pacing. 1.1x with an initial burst (the value
-            # used by the core flow handler) accumulates several seconds of
-            # drift over a long-running broadcast as VLC and similar clients
-            # let their buffer grow past TCP backpressure. Stations are
-            # served to clients that bring their own buffer, so we don't
-            # need the over-provisioning.
-            # Burst of 2s on each ffmpeg restart gives VLC enough cushion to
-            # ride out the producer-restart gap on skip without audible
-            # silence. Bigger bursts close the gap further but raise the
-            # skip-to-audio latency by the same amount.
+            # 1.0x avoids long-broadcast drift (core uses 1.1 which clients
+            # absorb past TCP backpressure). 2s burst per restart cushions
+            # VLC across the producer-restart gap on skip; bigger bursts
+            # close the gap further at the cost of more skip latency.
             extra_input_args=["-readrate", "1.0", "-readrate_initial_burst", "2"],
             chunk_size=chunk_size,
         ):
