@@ -452,16 +452,13 @@ class WebRadioProvider(PlayerProvider):
                 if queue is None or start_item is None:
                     break
                 session_id_at_start = queue.session_id
-                # Only sync to the wallclock live position when we are first
-                # starting (a listener may be tuning in mid-broadcast). After
-                # a PLAY_NOW / skip / seek, MA has set streamdetails.seek_
-                # position to the intended value, so leave it alone.
+                # Only on first start: catch up to where the broadcast would
+                # be now for a late-joining listener. On a restart MA already
+                # set streamdetails.seek_position to the intended value.
                 if first_iteration:
                     _join_at_live_position(queue, start_item)
                 first_iteration = False
-                # Clear before the inner session so we can distinguish a new
-                # play_media that arrives during/after this session from any
-                # earlier one we already consumed.
+                # Clear so a stale event can't satisfy the post-session wait.
                 station.pending_media_event.clear()
 
                 exit_reason = await self._run_one_flow_session(
