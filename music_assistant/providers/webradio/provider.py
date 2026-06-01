@@ -93,13 +93,6 @@ class _Station:
     # boundary so ffmpeg's context manager cleans up without being cancelled
     # mid-pipeline (avoids the _UnixReadPipeTransport race on Python 3.14).
     stop_event: asyncio.Event = field(default_factory=asyncio.Event)
-    # Set when play_media is called on the station player; last_play_media_
-    # session_id holds the queue.session_id observed by that call. The
-    # producer compares against queue.session_id to know whether the
-    # play_media corresponds to the current queue state (and not a prior
-    # transition whose event was still set).
-    play_media_event: asyncio.Event = field(default_factory=asyncio.Event)
-    last_play_media_session_id: str | None = None
     # Populated by the producer once output config is known.
     output_format: AudioFormat | None = None
     icy_preference: str = "disabled"
@@ -255,38 +248,6 @@ class WebRadioProvider(PlayerProvider):
         if station is None:
             return
         station.stop_event.set()
-
-    def signal_play_media(self, slug: str, session_id: str | None) -> None:
-        """
-        Record that play_media has just run for a station.
-
-        :param slug: Slug of the station whose player received play_media.
-        :param session_id: queue.session_id observed at the time of the call.
-        """
-        station = self._stations.get(slug)
-        if station is None:
-            return
-        station.last_play_media_session_id = session_id
-        station.play_media_event.set()
-
-    async def _wait_for_play_media(self, station: _Station, session_id: str | None) -> None:
-        """
-        Block until a play_media call observes the given session_id.
-
-        Returns early on a 2s timeout so a missed signal cannot deadlock the
-        producer.
-
-        :param station: Station whose play_media events should be watched.
-        :param session_id: queue.session_id the next play_media should report.
-        """
-        deadline = self.mass.loop.time() + 2.0
-        while station.last_play_media_session_id != session_id:
-            remaining = deadline - self.mass.loop.time()
-            if remaining <= 0:
-                return
-            station.play_media_event.clear()
-            with suppress(TimeoutError):
-                await asyncio.wait_for(station.play_media_event.wait(), timeout=remaining)
 
     async def _cancel_producer(self, station: _Station) -> None:
         """
@@ -493,13 +454,6 @@ class WebRadioProvider(PlayerProvider):
                     break
                 if queue.session_id == session_id_at_start:
                     break
-
-                # play_index bumps queue.session_id and clears the playlog
-                # before it sets queue.current_item, then calls play_media.
-                # Wait for a play_media that observed the current session_id
-                # so the next iteration reads the new current_item, not the
-                # stale one from before play_index ran.
-                await self._wait_for_play_media(station, queue.session_id)
                 self.logger.debug(
                     "Producer for station %s restarting on new queue session",
                     station.slug,
@@ -917,11 +871,6 @@ class WebRadioPlayer(Player):
         if queue is not None:
             queue.flow_mode = True
         self.update_state()
-        provider = self.provider
-        if isinstance(provider, WebRadioProvider):
-            provider.signal_play_media(
-                self._station_slug, queue.session_id if queue is not None else None
-            )
 
     async def play(self) -> None:
         """Resume playback and re-anchor the wallclock elapsed time."""
