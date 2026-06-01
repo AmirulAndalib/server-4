@@ -399,7 +399,7 @@ class WebRadioProvider(PlayerProvider):
             async with station.lock:
                 station.subscribers.discard(subscriber)
 
-    async def _run_producer(self, station: _Station) -> None:
+    async def _run_producer(self, station: _Station) -> None:  # noqa: PLR0915
         """
         Encode the station's queue and broadcast each chunk to every subscriber.
 
@@ -449,12 +449,19 @@ class WebRadioProvider(PlayerProvider):
                 chunk_size,
             )
 
+            first_iteration = True
             while True:
                 queue, start_item = self._resolve_pending_media(station)
                 if queue is None or start_item is None:
                     break
                 session_id_at_start = queue.session_id
-                _join_at_live_position(queue, start_item)
+                # Only sync to the wallclock live position when we are first
+                # starting (a listener may be tuning in mid-broadcast). After
+                # a PLAY_NOW / skip / seek, MA has set streamdetails.seek_
+                # position to the intended value, so leave it alone.
+                if first_iteration:
+                    _join_at_live_position(queue, start_item)
+                first_iteration = False
                 # Clear before the inner session so we can distinguish a new
                 # play_media that arrives during/after this session from any
                 # earlier one we already consumed.
