@@ -827,15 +827,17 @@ class WebRadioPlayer(Player):
             model="Web Radio Station",
             manufacturer="Music Assistant",
         )
-        # Override the auto-injected queue source so the UI gates seek off:
-        # seek is meaningless on a live broadcast and was observed to confuse
-        # some clients. Play/pause and next/previous remain available.
+        # Override the auto-injected queue source so the UI gates seek and
+        # pause off: seek is meaningless on a live broadcast (and was
+        # observed to confuse some clients), and pause has no real meaning
+        # on a broadcast either - the UI shows stop instead. Next/previous
+        # remain available.
         self._attr_source_list = [
             PlayerSource(
                 id=player_id,
                 name="Music Assistant Queue",
                 passive=False,
-                can_play_pause=True,
+                can_play_pause=False,
                 can_seek=False,
                 can_next_previous=True,
             ),
