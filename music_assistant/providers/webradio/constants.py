@@ -20,12 +20,10 @@ URL_PATH_PREFIX: Final[str] = "/webradio/"
 # Per-player config key for the read-only URL display entry.
 CONF_STREAM_URL_LABEL: Final[str] = "stream_url"
 
-# Override the platform-wide CONF_ENTRY_ENABLE_ICY_METADATA default for web
-# radio players: stations exist to advertise track titles to dumb clients,
-# so ICY is on by default. We pick "basic" for the lower-latency 16 KB
-# metaint - "full" adds a StreamURL field for cover art but raises the
-# server-side chunk buffer to ~8 s, slowing every skip; users with clients
-# that render artwork can opt into "full" in the per-player settings.
+# Override the platform default ("disabled") - stations exist to advertise
+# titles. "basic" rather than "full" because "full" also enlarges the
+# producer's chunk buffer to ~8 s, hurting skip latency; users whose clients
+# render cover art can opt into "full" per-station.
 CONF_ENTRY_ENABLE_ICY_METADATA_BASIC: Final[ConfigEntry] = ConfigEntry.from_dict(
     {**CONF_ENTRY_ENABLE_ICY_METADATA.to_dict(), "default_value": "basic"}
 )
