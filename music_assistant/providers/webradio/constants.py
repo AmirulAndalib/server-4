@@ -8,17 +8,17 @@ from music_assistant_models.config_entries import ConfigEntry
 
 from music_assistant.constants import CONF_ENTRY_ENABLE_ICY_METADATA
 
+# Provider config key holding the list of station display names.
 CONF_STATIONS: Final[str] = "stations"
-"""Provider config key holding the list of station display names."""
 
+# Prefix used when deriving an MA player_id from a station slug.
 PLAYER_ID_PREFIX: Final[str] = "webradio_"
-"""Prefix used when deriving an MA player_id from a station slug."""
 
+# Public URL path prefix under which each station is served.
 URL_PATH_PREFIX: Final[str] = "/webradio/"
-"""Public URL path prefix under which each station is served."""
 
+# Per-player config key for the read-only URL display entry.
 CONF_STREAM_URL_LABEL: Final[str] = "stream_url"
-"""Per-player config key for the read-only URL display entry."""
 
 # Override the platform-wide CONF_ENTRY_ENABLE_ICY_METADATA default for web
 # radio players: stations exist to advertise track titles to dumb clients,
