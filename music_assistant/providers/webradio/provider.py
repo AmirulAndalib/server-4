@@ -828,8 +828,8 @@ class WebRadioPlayer(Player):
             manufacturer="Music Assistant",
         )
         # Override the auto-injected queue source so the UI gates seek off:
-        # seeking a live broadcast is not meaningful here. Play/pause and
-        # next/previous remain available.
+        # seek is meaningless on a live broadcast and was observed to confuse
+        # some clients. Play/pause and next/previous remain available.
         self._attr_source_list = [
             PlayerSource(
                 id=player_id,
