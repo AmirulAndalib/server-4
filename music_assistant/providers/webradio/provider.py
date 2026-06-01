@@ -554,14 +554,10 @@ class WebRadioProvider(PlayerProvider):
             # let their buffer grow past TCP backpressure. Stations are
             # served to clients that bring their own buffer, so we don't
             # need the over-provisioning.
-            # -readrate 1.0: exact real-time pacing in steady state, so the
-            # MA UI stays aligned with what listeners hear over a long
-            # broadcast. -readrate_initial_burst 2: ffmpeg outputs ~2 s of
-            # audio at unrestricted speed at the head of each restart,
-            # giving VLC enough cushion to ride out the producer's ~500 ms
-            # restart gap without audible silence. Bigger bursts (e.g. 5)
-            # close the gap completely but also push VLC's buffer depth up,
-            # so skip latency rises in step.
+            # Burst of 2s on each ffmpeg restart gives VLC enough cushion to
+            # ride out the producer-restart gap on skip without audible
+            # silence. Bigger bursts close the gap further but raise the
+            # skip-to-audio latency by the same amount.
             extra_input_args=["-readrate", "1.0", "-readrate_initial_burst", "2"],
             chunk_size=chunk_size,
         ):
