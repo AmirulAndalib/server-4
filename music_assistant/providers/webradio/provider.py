@@ -12,6 +12,7 @@ from aiohttp import web
 from music_assistant_models.config_entries import ConfigEntry
 from music_assistant_models.enums import (
     ConfigEntryType,
+    ContentType,
     PlaybackState,
     PlayerFeature,
     ProviderFeature,
@@ -555,6 +556,17 @@ class WebRadioProvider(PlayerProvider):
             # served to clients that bring their own buffer, so we don't
             # need the over-provisioning.
             extra_input_args=["-readrate", "1.0"],
+            # On a PLAY_NOW/skip restart, the next ffmpeg pipeline emits a
+            # fresh ID3v2/Xing header at the head of its output. VLC sees
+            # that mid-stream (after draining its buffer of the prior track)
+            # and pauses to re-sync the MP3 decoder, audible as ~1 s of
+            # silence. Suppress those headers so each restart yields nothing
+            # but raw MP3 frames.
+            extra_output_args=(
+                ["-write_id3v2", "0", "-write_xing", "0"]
+                if output_format.content_type == ContentType.MP3
+                else None
+            ),
             chunk_size=chunk_size,
         ):
             # iter_chunked yields a short chunk only at ffmpeg EOF. Emitting
