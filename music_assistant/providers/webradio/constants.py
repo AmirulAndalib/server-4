@@ -22,8 +22,10 @@ CONF_STREAM_URL_LABEL: Final[str] = "stream_url"
 
 # Override the platform-wide CONF_ENTRY_ENABLE_ICY_METADATA default for web
 # radio players: stations exist to advertise track titles to dumb clients,
-# so ICY is on by default in the "full" profile (basic StreamTitle plus the
-# track's image URL via StreamURL).
-CONF_ENTRY_ENABLE_ICY_METADATA_FULL: Final[ConfigEntry] = ConfigEntry.from_dict(
-    {**CONF_ENTRY_ENABLE_ICY_METADATA.to_dict(), "default_value": "full"}
+# so ICY is on by default. We pick "basic" for the lower-latency 16 KB
+# metaint - "full" adds a StreamURL field for cover art but raises the
+# server-side chunk buffer to ~8 s, slowing every skip; users with clients
+# that render artwork can opt into "full" in the per-player settings.
+CONF_ENTRY_ENABLE_ICY_METADATA_BASIC: Final[ConfigEntry] = ConfigEntry.from_dict(
+    {**CONF_ENTRY_ENABLE_ICY_METADATA.to_dict(), "default_value": "basic"}
 )

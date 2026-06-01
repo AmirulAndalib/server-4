@@ -37,7 +37,7 @@ from music_assistant.models.player import Player
 from music_assistant.models.player_provider import PlayerProvider
 
 from .constants import (
-    CONF_ENTRY_ENABLE_ICY_METADATA_FULL,
+    CONF_ENTRY_ENABLE_ICY_METADATA_BASIC,
     CONF_STATIONS,
     CONF_STREAM_URL_LABEL,
     PLAYER_ID_PREFIX,
@@ -397,8 +397,8 @@ class WebRadioProvider(PlayerProvider):
             icy_preference = str(
                 self.mass.config.get_raw_player_config_value(
                     station.player_id,
-                    CONF_ENTRY_ENABLE_ICY_METADATA_FULL.key,
-                    CONF_ENTRY_ENABLE_ICY_METADATA_FULL.default_value,
+                    CONF_ENTRY_ENABLE_ICY_METADATA_BASIC.key,
+                    CONF_ENTRY_ENABLE_ICY_METADATA_BASIC.default_value,
                 )
             )
             chunk_size = _producer_chunk_size(icy_preference, output_format)
@@ -830,7 +830,7 @@ class WebRadioPlayer(Player):
         del action, values
         return [
             CONF_ENTRY_OUTPUT_CODEC_DEFAULT_MP3,
-            CONF_ENTRY_ENABLE_ICY_METADATA_FULL,
+            CONF_ENTRY_ENABLE_ICY_METADATA_BASIC,
             ConfigEntry(
                 key=CONF_STREAM_URL_LABEL,
                 type=ConfigEntryType.LABEL,
