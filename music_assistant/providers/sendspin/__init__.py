@@ -27,12 +27,9 @@ CONF_ENTRY_DISABLE_WEB_PLAYERS = ConfigEntry(
     key=CONF_DISABLE_WEB_PLAYERS,
     type=ConfigEntryType.BOOLEAN,
     label="Do not create players for web/app clients",
-    description="By default, Music Assistant registers a player for each web browser, "
-    "PWA or mobile app client that connects, allowing audio playback directly in that "
-    "client (for example, playing music in a browser tab).\n\n"
-    "Enable this option to prevent these local web/app players from being created. "
-    "Note that with this enabled, the Music Assistant web interface can no longer be "
-    "used as a playback target on the device it runs on.",
+    description="When enabled, players are not created for connecting web browser, "
+    "PWA or mobile app clients. The web interface can no longer be used as a "
+    "playback target on the device it runs on.",
     default_value=False,
     required=False,
     advanced=True,
