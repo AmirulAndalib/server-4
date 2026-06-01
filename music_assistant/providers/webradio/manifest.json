@@ -6,5 +6,6 @@
   "codeowners": ["@music-assistant"],
   "requirements": [],
   "documentation": "https://music-assistant.io/player-support/webradio/",
-  "multi_instance": false
+  "multi_instance": false,
+  "stage": "beta"
 }
