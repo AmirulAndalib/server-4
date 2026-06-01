@@ -5,10 +5,11 @@ Each configured station is exposed as a virtual MA player whose queue is
 served on a stable HTTP URL using the Shoutcast/ICY protocol. Dumb internet-
 radio devices, VLC, browsers and similar clients can tune in by URL.
 
-Audio is broadcast only while the queue is playing; stop and pause both end
-the broadcast (PAUSE is not advertised so MA's pause falls back to stop) and
-the queue running out also ends it. The producer ffmpeg pipeline starts on
-the first listener and shuts down once the last one disconnects.
+Audio is broadcast only while the queue is playing; stop ends the broadcast
+and the queue running out also ends it. Pause is not surfaced on the queue
+source - it has no meaningful behaviour on a live broadcast. The producer
+ffmpeg pipeline starts on the first listener and shuts down once the last
+one disconnects.
 """
 
 from __future__ import annotations
