@@ -102,10 +102,7 @@ class ArtistsController(MediaControllerBase[Artist]):
         if favorite_only:
             query_parts.append("favorite = 1")
         if album_artists_only:
-            query_parts.append(
-                f"item_id in (select {DB_TABLE_ALBUM_ARTISTS}.artist_id "
-                f"FROM {DB_TABLE_ALBUM_ARTISTS})"
-            )
+            query_parts.append(self._album_artists_only_clause())
         if query_parts:
             sql_query += f" WHERE {' AND '.join(query_parts)}"
         return await self.mass.music.database.get_count_from_query(sql_query)
@@ -136,10 +133,7 @@ class ArtistsController(MediaControllerBase[Artist]):
         extra_query_params: dict[str, Any] = {}
         extra_query_parts: list[str] = []
         if album_artists_only:
-            extra_query_parts.append(
-                f"artists.item_id in (select {DB_TABLE_ALBUM_ARTISTS}.artist_id "
-                f"from {DB_TABLE_ALBUM_ARTISTS})"
-            )
+            extra_query_parts.append(self._album_artists_only_clause())
         return await self.get_library_items_by_query(
             favorite=favorite,
             search=search,
@@ -174,10 +168,7 @@ class ArtistsController(MediaControllerBase[Artist]):
         """
         extra_query_parts: list[str] = []
         if album_artists_only:
-            extra_query_parts.append(
-                f"artists.item_id in (select {DB_TABLE_ALBUM_ARTISTS}.artist_id "
-                f"from {DB_TABLE_ALBUM_ARTISTS})"
-            )
+            extra_query_parts.append(self._album_artists_only_clause())
         return await self._get_letter_index_by_query(
             favorite=favorite,
             search=search,
@@ -385,6 +376,14 @@ class ArtistsController(MediaControllerBase[Artist]):
         return await self.mass.music.albums.get_library_items_by_query(
             extra_query_parts=[query],
             extra_query_params={"artist_id": db_id},
+        )
+
+    @staticmethod
+    def _album_artists_only_clause() -> str:
+        """Return the WHERE clause that limits artists to those that have albums."""
+        return (
+            f"artists.item_id in (select {DB_TABLE_ALBUM_ARTISTS}.artist_id "
+            f"from {DB_TABLE_ALBUM_ARTISTS})"
         )
 
     async def _add_library_item(

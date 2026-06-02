@@ -134,10 +134,7 @@ class AlbumsController(MediaControllerBase[Album]):
         extra_query_parts: list[str] = []
         extra_join_parts: list[str] = []
         artist_table_joined = False
-        # optional album type filter
-        if album_types:
-            extra_query_parts.append("albums.album_type IN :album_types")
-            extra_query_params["album_types"] = [x.value for x in album_types]
+        self._append_album_types_filter(album_types, extra_query_parts, extra_query_params)
         if order_by and "artist_name" in order_by:
             # join artist table to allow sorting on artist name
             extra_join_parts.append(
@@ -233,9 +230,7 @@ class AlbumsController(MediaControllerBase[Album]):
         """
         extra_query_parts: list[str] = []
         extra_query_params: dict[str, Any] = {}
-        if album_types:
-            extra_query_parts.append("albums.album_type IN :album_types")
-            extra_query_params["album_types"] = [x.value for x in album_types]
+        self._append_album_types_filter(album_types, extra_query_parts, extra_query_params)
         return await self._get_letter_index_by_query(
             favorite=favorite,
             search=search,
@@ -255,9 +250,7 @@ class AlbumsController(MediaControllerBase[Album]):
         query_params: dict[str, Any] = {}
         if favorite_only:
             query_parts.append("favorite = 1")
-        if album_types:
-            query_parts.append("albums.album_type IN :album_types")
-            query_params["album_types"] = [x.value for x in album_types]
+        self._append_album_types_filter(album_types, query_parts, query_params)
         if query_parts:
             sql_query += f" WHERE {' AND '.join(query_parts)}"
         return await self.mass.music.database.get_count_from_query(sql_query, query_params)
@@ -445,6 +438,18 @@ class AlbumsController(MediaControllerBase[Album]):
         """
         album = self.album_from_item_mapping(item)
         return await self.add_item_to_library(album)
+
+    @staticmethod
+    def _append_album_types_filter(
+        album_types: list[AlbumType] | None,
+        query_parts: list[str],
+        query_params: dict[str, Any],
+    ) -> None:
+        """Append the album_type filter to the given query parts/params, if any."""
+        if not album_types:
+            return
+        query_parts.append("albums.album_type IN :album_types")
+        query_params["album_types"] = [x.value for x in album_types]
 
     async def _add_library_item(self, item: Album, overwrite_existing: bool = False) -> int:
         """Add a new record to the database."""

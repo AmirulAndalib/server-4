@@ -972,11 +972,9 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
         in_library_only: bool = False,
     ) -> list[ItemCls]:
         """Fetch MediaItem records from database by building the query."""
-        query_params = dict(extra_query_params) if extra_query_params else {}
-        query_parts: list[str] = list(extra_query_parts) if extra_query_parts else []
-        join_parts: list[str] = list(extra_join_parts) if extra_join_parts else []
-        search = self._preprocess_search(search, query_params)
-        genre_ids = self._preprocess_genre_ids(genre_ids)
+        query_parts, join_parts, query_params, search, genre_ids = self._init_query_filters(
+            search, genre_ids, extra_query_parts, extra_query_params, extra_join_parts
+        )
         # create special performant random query
         if order_by and order_by.startswith("random"):
             self._apply_random_subquery(
@@ -1028,11 +1026,9 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
         # the index can only be built on the (natural-sort) name columns; any other
         # order_by has no meaningful alphabetic bucketing, so fall back to sort_name
         sort_column = "search_name" if order_by in ("name", "name_desc") else "search_sort_name"
-        query_params = dict(extra_query_params) if extra_query_params else {}
-        query_parts: list[str] = list(extra_query_parts) if extra_query_parts else []
-        join_parts: list[str] = list(extra_join_parts) if extra_join_parts else []
-        search = self._preprocess_search(search, query_params)
-        genre_ids = self._preprocess_genre_ids(genre_ids)
+        query_parts, join_parts, query_params, search, genre_ids = self._init_query_filters(
+            search, genre_ids, extra_query_parts, extra_query_params, extra_join_parts
+        )
         self._apply_filters(
             query_parts=query_parts,
             query_params=query_params,
@@ -1044,12 +1040,10 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
             in_library_only=True,
         )
         # mirror the library_items projection: one row per item in the requested order
-        inner_query = f"SELECT {self.db_table}.{sort_column} AS sort_key FROM {self.db_table}"
-        if join_parts:
-            inner_query += f" {' '.join(join_parts)} "
-        if query_parts:
-            inner_query += " WHERE " + " AND ".join(self._clean_query_parts(query_parts))
-        inner_query += f" GROUP BY {self.db_table}.item_id"
+        inner_query = (
+            f"SELECT {self.db_table}.{sort_column} AS sort_key FROM {self.db_table}"
+            + self._compose_filters_suffix(join_parts, query_parts)
+        )
         # bucket on the leading character: A-Z keep their (uppercased) letter,
         # everything else (numbers, symbols, empty sort names) collapses into "#"
         bucket_expr = (
@@ -1207,6 +1201,39 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
             )
 
     @final
+    def _init_query_filters(
+        self,
+        search: str | None,
+        genre_ids: int | list[int] | None,
+        extra_query_parts: list[str] | None,
+        extra_query_params: dict[str, Any] | None,
+        extra_join_parts: list[str] | None,
+    ) -> tuple[list[str], list[str], dict[str, Any], str | None, list[int] | None]:
+        """
+        Seed the query-building containers from the extras and normalize the filters.
+
+        :return: A tuple of (query_parts, join_parts, query_params, search, genre_ids).
+        """
+        query_params = dict(extra_query_params) if extra_query_params else {}
+        query_parts: list[str] = list(extra_query_parts) if extra_query_parts else []
+        join_parts: list[str] = list(extra_join_parts) if extra_join_parts else []
+        search = self._preprocess_search(search, query_params)
+        genre_ids = self._preprocess_genre_ids(genre_ids)
+        return query_parts, join_parts, query_params, search, genre_ids
+
+    @final
+    def _compose_filters_suffix(self, join_parts: list[str], query_parts: list[str]) -> str:
+        """Return the shared JOIN/WHERE/GROUP BY tail of a library query."""
+        suffix = ""
+        if join_parts:
+            suffix += f" {' '.join(join_parts)} "
+        if query_parts:
+            # prevent duplicate where statement
+            suffix += " WHERE " + " AND ".join(self._clean_query_parts(query_parts))
+        suffix += f" GROUP BY {self.db_table}.item_id"
+        return suffix
+
+    @final
     def _build_final_query(
         self,
         query_parts: list[str],
@@ -1214,24 +1241,9 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
         order_by: str | None,
     ) -> str:
         """Build the final SQL query string."""
-        sql_query = self.base_query
-
-        # Add joins
-        if join_parts:
-            sql_query += f" {' '.join(join_parts)} "
-
-        # Add where clauses
-        if query_parts:
-            # prevent duplicate where statement
-            sql_query += " WHERE " + " AND ".join(self._clean_query_parts(query_parts))
-
-        # Add grouping and ordering
-        sql_query += f" GROUP BY {self.db_table}.item_id"
-
-        if order_by:
-            if sort_key := SORT_KEYS.get(order_by):
-                sql_query += f" ORDER BY {sort_key}"
-
+        sql_query = self.base_query + self._compose_filters_suffix(join_parts, query_parts)
+        if order_by and (sort_key := SORT_KEYS.get(order_by)):
+            sql_query += f" ORDER BY {sort_key}"
         return sql_query
 
     @final
