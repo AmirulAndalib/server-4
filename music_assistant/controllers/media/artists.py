@@ -25,6 +25,7 @@ from music_assistant.controllers.media.base import MediaControllerBase
 from music_assistant.helpers.compare import compare_artist, compare_strings, create_safe_string
 from music_assistant.helpers.database import UNSET
 from music_assistant.helpers.json import serialize_to_json
+from music_assistant.models.letter_index import LetterIndex
 from music_assistant.models.music_provider import MusicProvider
 
 if TYPE_CHECKING:
@@ -150,6 +151,40 @@ class ArtistsController(MediaControllerBase[Artist]):
             extra_query_parts=extra_query_parts,
             extra_query_params=extra_query_params,
             in_library_only=True,
+        )
+
+    async def library_items_letter_index(
+        self,
+        favorite: bool | None = None,
+        search: str | None = None,
+        order_by: str = "sort_name",
+        provider: str | list[str] | None = None,
+        genre: int | list[int] | None = None,
+        album_artists_only: bool = False,
+        **kwargs: Any,
+    ) -> LetterIndex:
+        """Get the alphabetic letter index for the in-database (album) artists.
+
+        :param favorite: Filter by favorite status.
+        :param search: Filter by search query.
+        :param order_by: Order by field ('name' or 'sort_name').
+        :param provider: Filter by provider instance ID (single string or list).
+        :param genre: Filter by genre id(s).
+        :param album_artists_only: Only count artists that have albums.
+        """
+        extra_query_parts: list[str] = []
+        if album_artists_only:
+            extra_query_parts.append(
+                f"artists.item_id in (select {DB_TABLE_ALBUM_ARTISTS}.artist_id "
+                f"from {DB_TABLE_ALBUM_ARTISTS})"
+            )
+        return await self._get_letter_index_by_query(
+            favorite=favorite,
+            search=search,
+            order_by=order_by,
+            provider_filter=self._ensure_provider_filter(provider),
+            genre_ids=genre,
+            extra_query_parts=extra_query_parts,
         )
 
     async def tracks(

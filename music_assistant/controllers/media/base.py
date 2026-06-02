@@ -43,6 +43,7 @@ from music_assistant.helpers.compare import compare_media_item, create_safe_stri
 from music_assistant.helpers.database import UNSET
 from music_assistant.helpers.json import json_loads, serialize_to_json
 from music_assistant.helpers.util import guard_single_request, parse_optional_bool
+from music_assistant.models.letter_index import LetterBucket, LetterIndex
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Mapping
@@ -128,6 +129,9 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
         self.api_base = api_base = f"{self.media_type}s"
         self.mass.register_api_command(f"music/{api_base}/count", self.library_count)
         self.mass.register_api_command(f"music/{api_base}/library_items", self.library_items)
+        self.mass.register_api_command(
+            f"music/{api_base}/library_items/letter_index", self.library_items_letter_index
+        )
         self.mass.register_api_command(f"music/{api_base}/get", self.get)
         # Backward compatibility alias - prefer the generic "get" endpoint
         self.mass.register_api_command(
@@ -311,6 +315,37 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
             provider_filter=self._ensure_provider_filter(provider),
             genre_ids=genre,
             in_library_only=True,
+        )
+
+    async def library_items_letter_index(
+        self,
+        favorite: bool | None = None,
+        search: str | None = None,
+        order_by: str = "sort_name",
+        provider: str | list[str] | None = None,
+        genre: int | list[int] | None = None,
+        **kwargs: Any,
+    ) -> LetterIndex:
+        """
+        Get the alphabetic letter index for the library items of this mediatype.
+
+        Returns the zero-based offset of the first item for each alphabetic bucket,
+        using the exact same filters and ordering as library_items, so the offsets
+        line up with the positions in that listing.
+
+        :param favorite: Filter by favorite status.
+        :param search: Filter by search query.
+        :param order_by: Order by field ('name' or 'sort_name'); other values fall
+            back to 'sort_name'. The index is always built ascending.
+        :param provider: Filter by provider instance ID (single string or list).
+        :param genre: Filter by genre id(s).
+        """
+        return await self._get_letter_index_by_query(
+            favorite=favorite,
+            search=search,
+            order_by=order_by,
+            provider_filter=self._ensure_provider_filter(provider),
+            genre_ids=genre,
         )
 
     async def iter_library_items(
@@ -976,6 +1011,70 @@ class MediaControllerBase[ItemCls: "MediaItemType"](metaclass=ABCMeta):
                 sql_query, query_params, limit=limit, offset=offset
             )
         ]
+
+    @final
+    async def _get_letter_index_by_query(
+        self,
+        favorite: bool | None = None,
+        search: str | None = None,
+        order_by: str | None = None,
+        provider_filter: list[str] | None = None,
+        extra_query_parts: list[str] | None = None,
+        extra_query_params: dict[str, Any] | None = None,
+        extra_join_parts: list[str] | None = None,
+        genre_ids: int | list[int] | None = None,
+    ) -> LetterIndex:
+        """Build the alphabetic letter index from the database by building the query."""
+        # the index can only be built on the (natural-sort) name columns; any other
+        # order_by has no meaningful alphabetic bucketing, so fall back to sort_name
+        sort_column = "search_name" if order_by in ("name", "name_desc") else "search_sort_name"
+        query_params = dict(extra_query_params) if extra_query_params else {}
+        query_parts: list[str] = list(extra_query_parts) if extra_query_parts else []
+        join_parts: list[str] = list(extra_join_parts) if extra_join_parts else []
+        search = self._preprocess_search(search, query_params)
+        genre_ids = self._preprocess_genre_ids(genre_ids)
+        self._apply_filters(
+            query_parts=query_parts,
+            query_params=query_params,
+            join_parts=join_parts,
+            favorite=favorite,
+            search=search,
+            genre_ids=genre_ids,
+            provider_filter=provider_filter,
+            in_library_only=True,
+        )
+        # mirror the library_items projection: one row per item in the requested order
+        inner_query = f"SELECT {self.db_table}.{sort_column} AS sort_key FROM {self.db_table}"
+        if join_parts:
+            inner_query += f" {' '.join(join_parts)} "
+        if query_parts:
+            inner_query += " WHERE " + " AND ".join(self._clean_query_parts(query_parts))
+        inner_query += f" GROUP BY {self.db_table}.item_id"
+        # bucket on the leading character: A-Z keep their (uppercased) letter,
+        # everything else (numbers, symbols, empty sort names) collapses into "#"
+        bucket_expr = (
+            "CASE WHEN substr(sort_key, 1, 1) >= 'a' AND substr(sort_key, 1, 1) <= 'z' "
+            "THEN upper(substr(sort_key, 1, 1)) ELSE '#' END"
+        )
+        # number rows in the exact order library_items returns them, then reduce
+        # to the first offset of each bucket (only buckets with items remain)
+        numbered_query = (
+            f"SELECT {bucket_expr} AS label, "
+            "ROW_NUMBER() OVER (ORDER BY sort_key ASC) - 1 AS offset "
+            f"FROM ({inner_query})"
+        )
+        index_query = (
+            f"SELECT label, MIN(offset) AS offset FROM ({numbered_query}) "
+            "GROUP BY label ORDER BY offset"
+        )
+        rows = await self.mass.music.database.get_rows_from_query(
+            index_query, query_params, limit=0
+        )
+        total = await self.mass.music.database.get_count_from_query(inner_query, query_params)
+        return LetterIndex(
+            buckets=[LetterBucket(label=row["label"], offset=row["offset"]) for row in rows],
+            total=total,
+        )
 
     @property
     def _search_filter_clause(self) -> str:

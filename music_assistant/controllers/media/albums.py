@@ -30,6 +30,7 @@ from music_assistant.helpers.compare import (
 )
 from music_assistant.helpers.database import UNSET
 from music_assistant.helpers.json import serialize_to_json
+from music_assistant.models.letter_index import LetterIndex
 from music_assistant.models.music_provider import MusicProvider
 
 if TYPE_CHECKING:
@@ -210,6 +211,40 @@ class AlbumsController(MediaControllerBase[Album]):
                     if len(result) >= limit:
                         break
         return result
+
+    async def library_items_letter_index(
+        self,
+        favorite: bool | None = None,
+        search: str | None = None,
+        order_by: str = "sort_name",
+        provider: str | list[str] | None = None,
+        genre: int | list[int] | None = None,
+        album_types: list[AlbumType] | None = None,
+        **kwargs: Any,
+    ) -> LetterIndex:
+        """Get the alphabetic letter index for the in-database albums.
+
+        :param favorite: Filter by favorite status.
+        :param search: Filter by search query.
+        :param order_by: Order by field ('name' or 'sort_name').
+        :param provider: Filter by provider instance ID (single string or list).
+        :param genre: Filter by genre id(s).
+        :param album_types: Filter by album types.
+        """
+        extra_query_parts: list[str] = []
+        extra_query_params: dict[str, Any] = {}
+        if album_types:
+            extra_query_parts.append("albums.album_type IN :album_types")
+            extra_query_params["album_types"] = [x.value for x in album_types]
+        return await self._get_letter_index_by_query(
+            favorite=favorite,
+            search=search,
+            order_by=order_by,
+            provider_filter=self._ensure_provider_filter(provider),
+            genre_ids=genre,
+            extra_query_parts=extra_query_parts,
+            extra_query_params=extra_query_params,
+        )
 
     async def library_count(
         self, favorite_only: bool = False, album_types: list[AlbumType] | None = None
