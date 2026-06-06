@@ -44,7 +44,10 @@ from .const import (
     ITEM_KEY_ID,
     ITEM_KEY_MEDIA_STREAMS,
     ITEM_KEY_NAME,
+    ITEM_KEY_PATH,
     ITEM_KEY_RUNTIME_TICKS,
+    M3U_PLAYLIST_EXTENSIONS,
+    PLAYLIST_FIELDS,
     SUPPORTED_CONTAINER_FORMATS,
     TRACK_FIELDS,
     UNKNOWN_ARTIST_MAPPING,
@@ -324,14 +327,19 @@ class JellyfinProvider(MusicProvider):
             stream = (
                 self._client.playlists.parent(playlist_library[ITEM_KEY_ID])
                 .enable_userdata()
+                .fields(*PLAYLIST_FIELDS)
                 .stream(100)
             )
             async for playlist in stream:
                 if "MediaType" in playlist:  # Only jellyfin has this property
-                    # Native Jellyfin playlists report MediaType "Audio", but playlists
-                    # imported from m3u/file report "Unknown" - include both so that
-                    # externally created m3u playlists also show up.
-                    if playlist["MediaType"] in ("Audio", "Unknown"):
+                    if playlist["MediaType"] == "Audio":
+                        yield parse_playlist(self.instance_id, self._client, playlist)
+                    elif playlist["MediaType"] == "Unknown" and str(
+                        playlist.get(ITEM_KEY_PATH, "")
+                    ).lower().endswith(M3U_PLAYLIST_EXTENSIONS):
+                        # Playlists imported from m3u/file report MediaType "Unknown";
+                        # only accept ones actually backed by an m3u file so other
+                        # "Unknown" playlists (e.g. video) stay excluded.
                         yield parse_playlist(self.instance_id, self._client, playlist)
                 else:  # emby playlists are only audio type
                     yield parse_playlist(self.instance_id, self._client, playlist)
