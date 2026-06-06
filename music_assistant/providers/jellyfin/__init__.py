@@ -328,7 +328,10 @@ class JellyfinProvider(MusicProvider):
             )
             async for playlist in stream:
                 if "MediaType" in playlist:  # Only jellyfin has this property
-                    if playlist["MediaType"] == "Audio":
+                    # Native Jellyfin playlists report MediaType "Audio", but playlists
+                    # imported from m3u/file report "Unknown" - include both so that
+                    # externally created m3u playlists also show up.
+                    if playlist["MediaType"] in ("Audio", "Unknown"):
                         yield parse_playlist(self.instance_id, self._client, playlist)
                 else:  # emby playlists are only audio type
                     yield parse_playlist(self.instance_id, self._client, playlist)
@@ -410,6 +413,18 @@ class JellyfinProvider(MusicProvider):
             .start_index(page * 100)
             .request()
         )
+        if not playlist_items["Items"]:
+            # The /Playlists/{id}/Items endpoint returns nothing for playlists imported
+            # from m3u/file. Fall back to querying the playlist's children directly,
+            # which does return the tracks (ordering is left for MA to handle).
+            playlist_items = (
+                await self._client.tracks.parent(prov_playlist_id)
+                .enable_userdata()
+                .fields(*TRACK_FIELDS)
+                .limit(100)
+                .start_index(page * 100)
+                .request()
+            )
         for index, jellyfin_track in enumerate(playlist_items["Items"], 1):
             pos = (page * 100) + index
             try:
