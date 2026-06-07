@@ -47,6 +47,11 @@ MIN_SCHEMA_VERSION: Final[int] = 28
 
 MASS_LOGGER_NAME: Final[str] = "music_assistant"
 
+# StreamDetails.data key: optional list of extra ffmpeg input args a provider can request
+# for the inner concat demuxer when streaming a multi-file (MultiPartPath) item. Only applied
+# to the concat ffmpeg that opens the actual parts, never the single-file or outer decode path.
+STREAMDETAILS_DATA_CONCAT_INPUT_ARGS: Final[str] = "concat_input_args"
+
 # Home Assistant system user
 HOMEASSISTANT_SYSTEM_USER: Final[str] = "homeassistant_system"
 # Port used by the internal ingress webserver for the HA integration

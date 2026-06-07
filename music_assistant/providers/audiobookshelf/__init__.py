@@ -95,9 +95,14 @@ from music_assistant_models.media_items import (
 from music_assistant_models.media_items.media_item import RecommendationFolder
 from music_assistant_models.streamdetails import MultiPartPath, StreamDetails
 
-from music_assistant.constants import PLAYBACK_REPORT_INTERVAL_SECONDS, PlaylistPlayableItem
+from music_assistant.constants import (
+    PLAYBACK_REPORT_INTERVAL_SECONDS,
+    STREAMDETAILS_DATA_CONCAT_INPUT_ARGS,
+    PlaylistPlayableItem,
+)
 from music_assistant.controllers.cache import use_cache
 from music_assistant.helpers.datetime import from_utc_timestamp
+from music_assistant.helpers.ffmpeg import get_http_reconnect_args
 from music_assistant.models.music_provider import MusicProvider
 from music_assistant.providers.audiobookshelf.parsers import (
     parse_audiobook,
@@ -870,6 +875,19 @@ for more details.
                 )
             file_parts.append(MultiPartPath(path=stream_url, duration=track.duration))
 
+        is_multipart = len(file_parts) > 1
+        # For multi-file books the parts are concatenated by ffmpeg's concat demuxer, which
+        # (unlike the single-file http path) wouldn't otherwise get reconnect options. A
+        # transient TLS/HTTP disconnect mid-part (e.g. a reverse proxy timing out the
+        # connection) would then abort the whole stream. Ask the concat demuxer to use
+        # ffmpeg's reconnect logic so it resumes via a range request instead.
+        # See https://github.com/music-assistant/support/issues/5590
+        data = (
+            {STREAMDETAILS_DATA_CONCAT_INPUT_ARGS: get_http_reconnect_args()}
+            if is_multipart
+            else None
+        )
+
         return StreamDetails(
             provider=self.instance_id,
             item_id=abs_session.id_,
@@ -877,9 +895,10 @@ for more details.
             media_type=media_type,
             stream_type=StreamType.HTTP,
             duration=int(abs_session.duration),
-            path=file_parts[0].path if len(file_parts) == 1 else file_parts,
+            path=file_parts[0].path if not is_multipart else file_parts,
             can_seek=True,
             allow_seek=True,
+            data=data,
         )
 
     async def _get_playback_session(self, mass_item_id: str) -> AbsPlaybackSessionExpanded:

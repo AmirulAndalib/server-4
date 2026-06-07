@@ -65,6 +65,7 @@ from music_assistant.constants import (
     FLOW_MODE_SAMPLE_RATE_SMART,
     INTERNAL_PCM_FORMAT,
     MASS_LOGGER_NAME,
+    STREAMDETAILS_DATA_CONCAT_INPUT_ARGS,
     VERBOSE_LOG_LEVEL,
 )
 from music_assistant.controllers.streams.audio_analysis import LOUDNESS_ANALYSIS_DOMAIN
@@ -96,7 +97,7 @@ from music_assistant.helpers.audio import (
     resample_pcm_audio,
 )
 from music_assistant.helpers.dsp import filter_to_ffmpeg_params
-from music_assistant.helpers.ffmpeg import FFMpeg, get_ffmpeg_stream, get_http_reconnect_args
+from music_assistant.helpers.ffmpeg import FFMpeg, get_ffmpeg_stream
 from music_assistant.helpers.named_pipe import read_named_pipe
 from music_assistant.helpers.playlists import IsHLSPlaylist, PlaylistItem, fetch_playlist, parse_m3u
 from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER
@@ -1038,15 +1039,12 @@ class StreamsAudio:
             for path in files_list:
                 await f.write(f"file '{path}'\n")
 
-        # When the parts are remote (http) urls - e.g. audiobookshelf - enable ffmpeg's
-        # reconnect logic so a transient TLS/HTTP disconnect mid-part doesn't abort the
-        # whole stream. These protocol options propagate to the connections opened by the
-        # concat demuxer. See https://github.com/music-assistant/support/issues/5590
-        reconnect_args = (
-            get_http_reconnect_args()
-            if files_list and str(files_list[0]).startswith("http")
-            else []
-        )
+        # A provider may opt in to extra ffmpeg input args for the concat demuxer that opens
+        # the parts (e.g. audiobookshelf requesting http reconnect args, see issue #5590).
+        # Defaults to none, so behaviour is unchanged for providers that don't set it.
+        concat_input_args: list[str] = []
+        if streamdetails.data:
+            concat_input_args = streamdetails.data.get(STREAMDETAILS_DATA_CONCAT_INPUT_ARGS) or []
 
         try:
             async for chunk in get_ffmpeg_stream(
@@ -1059,7 +1057,7 @@ class StreamsAudio:
                     channels=streamdetails.audio_format.channels,
                 ),
                 extra_input_args=[
-                    *reconnect_args,
+                    *concat_input_args,
                     "-safe",
                     "0",
                     "-f",
