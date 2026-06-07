@@ -352,6 +352,33 @@ def parse_ffmpeg_duration(line: str) -> int | None:
     return int(hours) * 3600 + int(minutes) * 60 + int(float(seconds))
 
 
+def get_http_reconnect_args() -> list[str]:
+    """
+    Return ffmpeg input args that make the http(s) protocol resilient to disconnects.
+
+    These let ffmpeg transparently reconnect (using a range request) when a remote
+    server drops the connection mid-transfer instead of aborting the whole stream.
+    """
+    return [
+        # Reconnect automatically when disconnected before EOF is hit.
+        "-reconnect",
+        "1",
+        # Set the maximum delay in seconds after which to give up reconnecting.
+        "-reconnect_delay_max",
+        "10",
+        # If set then even streamed/non seekable streams will be reconnected on errors.
+        "-reconnect_streamed",
+        "1",
+        # Reconnect automatically in case of TCP/TLS errors during connect.
+        "-reconnect_on_network_error",
+        "0",
+        # A comma separated list of HTTP status codes to reconnect on.
+        # The list can include specific status codes (e.g. 503) or the strings 4xx / 5xx.
+        "-reconnect_on_http_error",
+        "5xx,429",
+    ]
+
+
 async def get_ffmpeg_stream(
     audio_input: AsyncGenerator[bytes] | str,
     input_format: AudioFormat,
@@ -430,24 +457,7 @@ def get_ffmpeg_args(  # noqa: PLR0915
         input_args = [*extra_input_args]
         if input_path.startswith("http"):
             # append reconnect options for direct stream from http
-            input_args += [
-                # Reconnect automatically when disconnected before EOF is hit.
-                "-reconnect",
-                "1",
-                # Set the maximum delay in seconds after which to give up reconnecting.
-                "-reconnect_delay_max",
-                "10",
-                # If set then even streamed/non seekable streams will be reconnected on errors.
-                "-reconnect_streamed",
-                "1",
-                # Reconnect automatically in case of TCP/TLS errors during connect.
-                "-reconnect_on_network_error",
-                "0",
-                # A comma separated list of HTTP status codes to reconnect on.
-                # The list can include specific status codes (e.g. 503) or the strings 4xx / 5xx.
-                "-reconnect_on_http_error",
-                "5xx,429",
-            ]
+            input_args += get_http_reconnect_args()
         if input_format.content_type.is_pcm():
             input_args += [
                 "-ac",

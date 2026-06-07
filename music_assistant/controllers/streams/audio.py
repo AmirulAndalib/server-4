@@ -96,7 +96,7 @@ from music_assistant.helpers.audio import (
     resample_pcm_audio,
 )
 from music_assistant.helpers.dsp import filter_to_ffmpeg_params
-from music_assistant.helpers.ffmpeg import FFMpeg, get_ffmpeg_stream
+from music_assistant.helpers.ffmpeg import FFMpeg, get_ffmpeg_stream, get_http_reconnect_args
 from music_assistant.helpers.named_pipe import read_named_pipe
 from music_assistant.helpers.playlists import IsHLSPlaylist, PlaylistItem, fetch_playlist, parse_m3u
 from music_assistant.helpers.throttle_retry import BYPASS_THROTTLER
@@ -1038,6 +1038,16 @@ class StreamsAudio:
             for path in files_list:
                 await f.write(f"file '{path}'\n")
 
+        # When the parts are remote (http) urls - e.g. audiobookshelf - enable ffmpeg's
+        # reconnect logic so a transient TLS/HTTP disconnect mid-part doesn't abort the
+        # whole stream. These protocol options propagate to the connections opened by the
+        # concat demuxer. See https://github.com/music-assistant/support/issues/5590
+        reconnect_args = (
+            get_http_reconnect_args()
+            if files_list and str(files_list[0]).startswith("http")
+            else []
+        )
+
         try:
             async for chunk in get_ffmpeg_stream(
                 audio_input=temp_file,
@@ -1049,6 +1059,7 @@ class StreamsAudio:
                     channels=streamdetails.audio_format.channels,
                 ),
                 extra_input_args=[
+                    *reconnect_args,
                     "-safe",
                     "0",
                     "-f",
