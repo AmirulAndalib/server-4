@@ -1114,7 +1114,16 @@ class PlexProvider(MusicProvider):
         """Get a list of albums for the given artist."""
         if not prov_artist_id.startswith(FAKE_ARTIST_PREFIX):
             plex_artist = await self._get_data(prov_artist_id, PlexArtist)
-            plex_albums = cast("list[PlexAlbum]", await self._run_async(plex_artist.albums))
+            # Fetch the albums via the artist's /children endpoint instead of
+            # PlexArtist.albums(), which relies on Plex's advanced filters API
+            # (it searches albums filtered by 'artist.id'). Some Plex servers
+            # return no filtering metadata, making plexapi raise
+            # 'Unknown libtype "artist"' so the album list never loads.
+            albums_key = f"{plex_artist.key}/children"
+            plex_albums = cast(
+                "list[PlexAlbum]",
+                await self._run_async(plex_artist.fetchItems, albums_key, PlexAlbum),
+            )
             if plex_albums:
                 albums = []
                 for album_obj in plex_albums:
