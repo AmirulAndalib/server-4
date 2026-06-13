@@ -28,11 +28,10 @@ CONF_ENTRY_ENABLE_ICY_METADATA_BASIC: Final[ConfigEntry] = ConfigEntry.from_dict
     {**CONF_ENTRY_ENABLE_ICY_METADATA.to_dict(), "default_value": "basic"}
 )
 
-# Limit codec choices to frame-based, mid-stream-joinable formats. FLAC and
-# WAV start with a header (STREAMINFO / RIFF) that listeners tuning in
-# mid-broadcast would never see, and each ffmpeg restart on skip emits a
-# fresh one - both break the broadcast model. MP3 and AAC ADTS are
-# self-synchronising on every frame.
+# Restrict to frame-synchronising codecs. MP3 and AAC ADTS can be joined
+# mid-stream and survive a producer restart. FLAC and WAV depend on a
+# header (STREAMINFO / RIFF) at the start of the stream that mid-stream
+# listeners cannot recover and that each restart re-emits.
 CONF_ENTRY_OUTPUT_CODEC_WEBRADIO: Final[ConfigEntry] = ConfigEntry.from_dict(
     {
         **CONF_ENTRY_OUTPUT_CODEC.to_dict(),
