@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from typing import Final
 
-from music_assistant_models.config_entries import ConfigEntry
+from music_assistant_models.config_entries import ConfigEntry, ConfigValueOption
 
-from music_assistant.constants import CONF_ENTRY_ENABLE_ICY_METADATA
+from music_assistant.constants import CONF_ENTRY_ENABLE_ICY_METADATA, CONF_ENTRY_OUTPUT_CODEC
 
 # Provider config key holding the list of station display names.
 CONF_STATIONS: Final[str] = "stations"
@@ -26,4 +26,20 @@ CONF_STREAM_URL_LABEL: Final[str] = "stream_url"
 # render cover art can opt into "full" per-station.
 CONF_ENTRY_ENABLE_ICY_METADATA_BASIC: Final[ConfigEntry] = ConfigEntry.from_dict(
     {**CONF_ENTRY_ENABLE_ICY_METADATA.to_dict(), "default_value": "basic"}
+)
+
+# Limit codec choices to frame-based, mid-stream-joinable formats. FLAC and
+# WAV start with a header (STREAMINFO / RIFF) that listeners would never see
+# if they tune in mid-broadcast, and each ffmpeg restart on skip emits a
+# fresh one - both break our broadcast model. MP3 and AAC ADTS are
+# self-synchronising on every frame, so they work cleanly.
+CONF_ENTRY_OUTPUT_CODEC_WEBRADIO: Final[ConfigEntry] = ConfigEntry.from_dict(
+    {
+        **CONF_ENTRY_OUTPUT_CODEC.to_dict(),
+        "default_value": "mp3",
+        "options": [
+            ConfigValueOption("MP3 (lossy)", "mp3").to_dict(),
+            ConfigValueOption("AAC (lossy)", "aac").to_dict(),
+        ],
+    }
 )
