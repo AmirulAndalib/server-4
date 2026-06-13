@@ -93,9 +93,9 @@ class _Station:
     # boundary so ffmpeg's context manager cleans up without being cancelled
     # mid-pipeline (avoids the _UnixReadPipeTransport race on Python 3.14).
     stop_event: asyncio.Event = field(default_factory=asyncio.Event)
-    # Latest PlayerMedia handed to the player (set by play_media, cleared
-    # by stop). The producer reads this instead of queue.current_item so
-    # it cannot race the queue controller's mid-skip mutations.
+    # Latest PlayerMedia the queue asked us to broadcast (set by play_media,
+    # cleared by stop). The producer reads this instead of queue.current_item
+    # so it cannot race the queue controller's mid-skip mutations.
     pending_media: PlayerMedia | None = None
     pending_media_event: asyncio.Event = field(default_factory=asyncio.Event)
     # Populated by the producer once output config is known.
@@ -244,23 +244,14 @@ class WebRadioProvider(PlayerProvider):
         player.set_stream_url(self._public_url(url_path))
 
     def stop_producer(self, slug: str) -> None:
-        """
-        Terminate a station's broadcast.
-
-        :param slug: Slug of the station whose producer should stop.
-        """
+        """Terminate a station's broadcast."""
         station = self._stations.get(slug)
         if station is None:
             return
         station.stop_event.set()
 
-    def signal_play_media(self, slug: str, media: PlayerMedia) -> None:
-        """
-        Hand a new PlayerMedia to a station's producer.
-
-        :param slug: Slug of the station whose player received play_media.
-        :param media: The media MA wants the station to broadcast next.
-        """
+    def set_pending_media(self, slug: str, media: PlayerMedia) -> None:
+        """Hand a new PlayerMedia to a station's producer for broadcast."""
         station = self._stations.get(slug)
         if station is None:
             return
@@ -268,11 +259,7 @@ class WebRadioProvider(PlayerProvider):
         station.pending_media_event.set()
 
     def clear_pending_media(self, slug: str) -> None:
-        """
-        Drop a station's stored PlayerMedia.
-
-        :param slug: Slug of the station whose pending media should be cleared.
-        """
+        """Drop a station's stored PlayerMedia."""
         station = self._stations.get(slug)
         if station is None:
             return
@@ -280,11 +267,7 @@ class WebRadioProvider(PlayerProvider):
         station.pending_media_event.clear()
 
     async def _cancel_producer(self, station: _Station) -> None:
-        """
-        Stop a station's producer task and wait for it to finish.
-
-        :param station: Station whose producer should be wound down.
-        """
+        """Stop a station's producer task and wait for it to finish."""
         task = station.producer_task
         if task is None or task.done():
             return
@@ -300,11 +283,7 @@ class WebRadioProvider(PlayerProvider):
             pass
 
     def refresh_station_route(self, slug: str) -> None:
-        """
-        Re-register a station's HTTP route after its codec config changed.
-
-        :param slug: Slug of the station whose route should be refreshed.
-        """
+        """Re-register a station's HTTP route after its codec config changed."""
         station = self._stations.get(slug)
         if station is None:
             return
@@ -320,23 +299,14 @@ class WebRadioProvider(PlayerProvider):
         station.player.set_stream_url(self._public_url(new_path))
 
     def _station_codec(self, player_id: str) -> str:
-        """
-        Return the configured output codec extension for a player.
-
-        :param player_id: MA player_id of the virtual station player.
-        :return: Codec value, e.g. ``"mp3"`` or ``"aac"``.
-        """
+        """Return the configured output codec extension for a player, e.g. ``"mp3"``."""
         codec = self.mass.config.get_raw_player_config_value(
             player_id, CONF_OUTPUT_CODEC, CONF_ENTRY_OUTPUT_CODEC_WEBRADIO.default_value
         )
         return str(codec or "mp3")
 
     def _public_url(self, url_path: str) -> str:
-        """
-        Build the externally reachable HTTP URL for a station path.
-
-        :param url_path: Internal stream route path, e.g. ``"/webradio/rock.mp3"``.
-        """
+        """Build the externally reachable HTTP URL for a station path."""
         return f"{self.mass.streams.base_url}{url_path}"
 
     def _station_for_request(self, request: web.Request) -> _Station:
@@ -414,7 +384,7 @@ class WebRadioProvider(PlayerProvider):
                 station.producer_ready.set()
                 return
 
-            flow_pcm_format = await self.mass.streams.audio.select_flow_format(station.player)
+            flow_pcm_format = await self.mass.streams.audio.select_flow_pcm_format(station.player)
             output_format = await self.mass.streams.audio.get_output_format(
                 output_format_str=station.url_path.rsplit(".", 1)[-1],
                 player=station.player,
@@ -480,11 +450,11 @@ class WebRadioProvider(PlayerProvider):
                             station.producer_ready.clear()
                             clean_exit = True
                             return
-                    # A subscriber raced back in during exit.
+                    # A subscriber raced back in while we were exiting.
                     continue
 
-                # exit_reason == "ended". If queue.session_id moved on the
-                # broadcast was skipped past; otherwise the queue ran out.
+                # exit_reason == "ended". If queue.session_id moved on we
+                # were skipped past; otherwise the queue actually ran out.
                 queue = self.mass.player_queues.get(station.player_id)
                 if queue is None:
                     break
@@ -498,12 +468,12 @@ class WebRadioProvider(PlayerProvider):
                     station.slug,
                 )
         finally:
-            # Unblock waiters even on error so they observe output_format
+            # Unblock waiters even on error: they will then see output_format
             # is None and return HTTP 503.
             if not station.producer_ready.is_set():
                 station.producer_ready.set()
             if not clean_exit:
-                await self._kick_all_subscribers_and_reset(station)
+                await self._reset_producer(station)
             self.logger.debug("Producer ended for station %s", station.slug)
 
     async def _run_one_flow_session(
@@ -548,8 +518,8 @@ class WebRadioProvider(PlayerProvider):
         ):
             # iter_chunked yields a short chunk only at ffmpeg EOF. Emitting
             # one would desync the client's icy-metaint counter for the rest
-            # of the connection, so drop it; the audio loss is bounded to
-            # <1s at session end.
+            # of the connection, so drop it (we lose <1s of audio at session
+            # end).
             if len(chunk) < chunk_size:
                 continue
 
@@ -567,7 +537,7 @@ class WebRadioProvider(PlayerProvider):
                     station.slug,
                 )
                 station.subscribers.discard(sub)
-                _drain_and_signal(sub)
+                _disconnect_subscriber(sub)
 
             if not station.subscribers:
                 return "no_subscribers"
@@ -612,23 +582,23 @@ class WebRadioProvider(PlayerProvider):
                 slow.append(sub)
         return slow
 
-    async def _kick_all_subscribers_and_reset(self, station: _Station) -> None:
+    async def _reset_producer(self, station: _Station) -> None:
         """
         Disconnect every subscriber and reset the station's producer slot.
 
         :param station: Station to reset.
         """
-        # Clear subscribers and reset producer_task under the same lock so
-        # a new subscriber arriving here observes producer_task is None and
-        # starts a fresh producer, rather than joining one that is shutting
-        # down.
+        # Clearing subscribers and resetting producer_task happen under the
+        # same lock so a new subscriber arriving here cannot join a producer
+        # that is already dying; instead it sees producer_task is None and
+        # starts a fresh one.
         async with station.lock:
             subs = list(station.subscribers)
             station.subscribers.clear()
             station.producer_task = None
             station.producer_ready.clear()
         for sub in subs:
-            _drain_and_signal(sub)
+            _disconnect_subscriber(sub)
 
     async def _serve_subscriber(
         self,
@@ -721,21 +691,13 @@ def _producer_chunk_size(icy_preference: str, output_format: AudioFormat) -> int
 
 
 def _head_response(codec: str) -> web.Response:
-    """
-    Build a minimal response for a HEAD probe on a station URL.
-
-    :param codec: Configured output codec for the station, e.g. ``"mp3"``.
-    """
+    """Build a minimal response for a HEAD probe on a station URL."""
     headers = {**DEFAULT_STREAM_HEADERS, "Content-Type": get_mime_type(codec)}
     return web.Response(status=200, headers=headers)
 
 
-def _drain_and_signal(subscriber: _Subscriber) -> None:
-    """
-    Signal end-of-stream to a subscriber.
-
-    :param subscriber: Subscriber to disconnect.
-    """
+def _disconnect_subscriber(subscriber: _Subscriber) -> None:
+    """Signal end-of-stream to a subscriber so its serving loop exits."""
     while not subscriber.queue.empty():
         try:
             subscriber.queue.get_nowait()
@@ -746,11 +708,7 @@ def _drain_and_signal(subscriber: _Subscriber) -> None:
 
 
 def _sanitize_header(value: str) -> str:
-    """
-    Return a header-safe form of an arbitrary string.
-
-    :param value: Raw header value, typically a player-configured display name.
-    """
+    """Return a header-safe form of an arbitrary string."""
     return value.replace("\n", " ").replace("\r", " ").replace("\t", " ")
 
 
@@ -825,9 +783,9 @@ class WebRadioPlayer(Player):
             manufacturer="Music Assistant",
         )
         # Override the auto-injected queue source so the UI gates seek and
-        # pause off. Seek is meaningless on a live broadcast and was
-        # observed to confuse some clients; pause has no meaning on a live
-        # broadcast either, so the UI shows stop instead. Next/previous
+        # pause off: seek is meaningless on a live broadcast (and was
+        # observed to confuse some clients), and pause has no real meaning
+        # on a broadcast either - the UI shows stop instead. Next/previous
         # remain available.
         self._attr_source_list = [
             PlayerSource(
@@ -851,11 +809,7 @@ class WebRadioPlayer(Player):
         return self._station_slug
 
     def set_stream_url(self, url: str) -> None:
-        """
-        Cache the public URL so it can be shown in the player's settings.
-
-        :param url: Externally reachable HTTP URL for this station.
-        """
+        """Cache the public URL so it can be shown in the player's settings."""
         self._stream_url = url
 
     async def get_config_entries(
@@ -863,13 +817,7 @@ class WebRadioPlayer(Player):
         action: str | None = None,
         values: dict[str, ConfigValueType] | None = None,
     ) -> list[ConfigEntry]:
-        """
-        Return player-level config entries.
-
-        :param action: Optional action key from the config UI.
-        :param values: Optional intermediate config values from the UI.
-        :return: List of ConfigEntry objects for this player.
-        """
+        """Return player-level config entries."""
         del action, values
         return [
             CONF_ENTRY_OUTPUT_CODEC_WEBRADIO,
@@ -892,31 +840,27 @@ class WebRadioPlayer(Player):
             provider.refresh_station_route(self._station_slug)
 
     async def play_media(self, media: PlayerMedia) -> None:
-        """
-        Mark the station as playing and start the wallclock progress anchor.
-
-        :param media: Details of the media item to play.
-        """
-        # The station has no external sink: audio only leaves the server
-        # when an HTTP listener connects. Anchor elapsed_time so the queue
-        # controller can wallclock-advance current_item (and therefore the
-        # artwork and title shown in the UI) as if the queue were playing.
+        """Mark the station as playing and start the wallclock progress anchor."""
+        # The station has no external sink: audio only leaves the box when an
+        # HTTP listener connects. We still anchor elapsed_time here so MA's
+        # queue controller can wallclock-advance current_item (and therefore
+        # the artwork/title shown in the UI) as if the queue were playing.
         self._attr_current_media = media
         self._attr_playback_state = PlaybackState.PLAYING
         self._attr_elapsed_time = 0
         self._attr_elapsed_time_last_updated = time.time()
         # Pre-set queue.flow_mode so the queue controller does not schedule
         # enqueue_next_media during the listener-not-yet-connected window
-        # (this player does not advertise PlayerFeature.ENQUEUE).
-        # get_queue_flow_stream sets the same flag once a listener attaches
-        # and the producer begins streaming.
+        # (PlayerFeature.ENQUEUE is intentionally not advertised by this
+        # player). get_queue_flow_stream sets the same flag once a listener
+        # attaches and the producer runs for real.
         queue = self.mass.player_queues.get(self.player_id)
         if queue is not None:
             queue.flow_mode = True
         self.update_state()
         provider = self.provider
         if isinstance(provider, WebRadioProvider):
-            provider.signal_play_media(self._station_slug, media)
+            provider.set_pending_media(self._station_slug, media)
 
     async def play(self) -> None:
         """Resume playback and re-anchor the wallclock elapsed time."""
