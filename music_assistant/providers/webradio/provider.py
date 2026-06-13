@@ -93,9 +93,9 @@ class _Station:
     # boundary so ffmpeg's context manager cleans up without being cancelled
     # mid-pipeline (avoids the _UnixReadPipeTransport race on Python 3.14).
     stop_event: asyncio.Event = field(default_factory=asyncio.Event)
-    # Latest PlayerMedia the queue asked us to broadcast (set by play_media,
-    # cleared by stop). The producer reads this instead of queue.current_item
-    # so it cannot race the queue controller's mid-skip mutations.
+    # Latest PlayerMedia handed to the player (set by play_media, cleared
+    # by stop). The producer reads this instead of queue.current_item so
+    # it cannot race the queue controller's mid-skip mutations.
     pending_media: PlayerMedia | None = None
     pending_media_event: asyncio.Event = field(default_factory=asyncio.Event)
     # Populated by the producer once output config is known.
@@ -480,11 +480,11 @@ class WebRadioProvider(PlayerProvider):
                             station.producer_ready.clear()
                             clean_exit = True
                             return
-                    # A subscriber raced back in while we were exiting.
+                    # A subscriber raced back in during exit.
                     continue
 
-                # exit_reason == "ended". If queue.session_id moved on we
-                # were skipped past; otherwise the queue actually ran out.
+                # exit_reason == "ended". If queue.session_id moved on the
+                # broadcast was skipped past; otherwise the queue ran out.
                 queue = self.mass.player_queues.get(station.player_id)
                 if queue is None:
                     break
@@ -498,7 +498,7 @@ class WebRadioProvider(PlayerProvider):
                     station.slug,
                 )
         finally:
-            # Unblock waiters even on error: they will then see output_format
+            # Unblock waiters even on error so they observe output_format
             # is None and return HTTP 503.
             if not station.producer_ready.is_set():
                 station.producer_ready.set()
@@ -548,8 +548,8 @@ class WebRadioProvider(PlayerProvider):
         ):
             # iter_chunked yields a short chunk only at ffmpeg EOF. Emitting
             # one would desync the client's icy-metaint counter for the rest
-            # of the connection, so drop it (we lose <1s of audio at session
-            # end).
+            # of the connection, so drop it; the audio loss is bounded to
+            # <1s at session end.
             if len(chunk) < chunk_size:
                 continue
 
@@ -618,10 +618,10 @@ class WebRadioProvider(PlayerProvider):
 
         :param station: Station to reset.
         """
-        # Clearing subscribers and resetting producer_task happen under the
-        # same lock so a new subscriber arriving here cannot join a producer
-        # that is already dying; instead it sees producer_task is None and
-        # starts a fresh one.
+        # Clear subscribers and reset producer_task under the same lock so
+        # a new subscriber arriving here observes producer_task is None and
+        # starts a fresh producer, rather than joining one that is shutting
+        # down.
         async with station.lock:
             subs = list(station.subscribers)
             station.subscribers.clear()
@@ -825,9 +825,9 @@ class WebRadioPlayer(Player):
             manufacturer="Music Assistant",
         )
         # Override the auto-injected queue source so the UI gates seek and
-        # pause off: seek is meaningless on a live broadcast (and was
-        # observed to confuse some clients), and pause has no real meaning
-        # on a broadcast either - the UI shows stop instead. Next/previous
+        # pause off. Seek is meaningless on a live broadcast and was
+        # observed to confuse some clients; pause has no meaning on a live
+        # broadcast either, so the UI shows stop instead. Next/previous
         # remain available.
         self._attr_source_list = [
             PlayerSource(
@@ -897,19 +897,19 @@ class WebRadioPlayer(Player):
 
         :param media: Details of the media item to play.
         """
-        # The station has no external sink: audio only leaves the box when an
-        # HTTP listener connects. We still anchor elapsed_time here so MA's
-        # queue controller can wallclock-advance current_item (and therefore
-        # the artwork/title shown in the UI) as if the queue were playing.
+        # The station has no external sink: audio only leaves the server
+        # when an HTTP listener connects. Anchor elapsed_time so the queue
+        # controller can wallclock-advance current_item (and therefore the
+        # artwork and title shown in the UI) as if the queue were playing.
         self._attr_current_media = media
         self._attr_playback_state = PlaybackState.PLAYING
         self._attr_elapsed_time = 0
         self._attr_elapsed_time_last_updated = time.time()
         # Pre-set queue.flow_mode so the queue controller does not schedule
         # enqueue_next_media during the listener-not-yet-connected window
-        # (PlayerFeature.ENQUEUE is intentionally not advertised by this
-        # player). get_queue_flow_stream sets the same flag once a listener
-        # attaches and the producer runs for real.
+        # (this player does not advertise PlayerFeature.ENQUEUE).
+        # get_queue_flow_stream sets the same flag once a listener attaches
+        # and the producer begins streaming.
         queue = self.mass.player_queues.get(self.player_id)
         if queue is not None:
             queue.flow_mode = True
