@@ -1456,7 +1456,9 @@ class PlayerQueuesController(CoreController):
             raise MediaNotFoundError("No playable items found")
 
         # load the items into the queue
-        await self._enqueue_with_option(queue_id, queue_items, option, radio_mode)
+        await self._enqueue_with_option(
+            queue_id, queue_items, option, radio_mode, keep_first=start_item is not None
+        )
 
     async def _enqueue_with_option(
         self,
@@ -1464,6 +1466,7 @@ class PlayerQueuesController(CoreController):
         queue_items: list[QueueItem],
         option: QueueOption | None,
         radio_mode: bool,
+        keep_first: bool = False,
     ) -> None:
         """Load queue items into the queue according to the given enqueue option."""
         queue = self._queues[queue_id]
@@ -1487,6 +1490,7 @@ class PlayerQueuesController(CoreController):
                 keep_remaining=False,
                 keep_played=False,
                 shuffle=shuffle,
+                keep_first=keep_first,
             )
             await self.play_index(queue_id, 0)
             return
@@ -1497,6 +1501,7 @@ class PlayerQueuesController(CoreController):
                 queue_items=queue_items,
                 insert_at_index=insert_at_index,
                 shuffle=shuffle,
+                keep_first=keep_first,
             )
             return
         if option == QueueOption.REPLACE_NEXT:
@@ -1506,6 +1511,7 @@ class PlayerQueuesController(CoreController):
                 insert_at_index=insert_at_index,
                 keep_remaining=False,
                 shuffle=shuffle,
+                keep_first=keep_first,
             )
             return
         # handle play: replace current loaded/playing index with new item(s)
@@ -1515,6 +1521,7 @@ class PlayerQueuesController(CoreController):
                 queue_items=queue_items,
                 insert_at_index=insert_at_index,
                 shuffle=shuffle,
+                keep_first=keep_first,
             )
             next_index = min(insert_at_index, len(self._queue_items[queue_id]) - 1)
             await self.play_index(queue_id, next_index)
@@ -1528,6 +1535,7 @@ class PlayerQueuesController(CoreController):
                 if queue.shuffle_enabled
                 else len(self._queue_items[queue_id]) + 1,
                 shuffle=queue.shuffle_enabled,
+                keep_first=keep_first,
             )
             # handle edgecase, queue is empty and items are only added (not played)
             # mark first item as new index
@@ -1754,6 +1762,7 @@ class PlayerQueuesController(CoreController):
         keep_remaining: bool = True,
         keep_played: bool = True,
         shuffle: bool = False,
+        keep_first: bool = False,
     ) -> None:
         """Load new items at index.
 
@@ -1762,6 +1771,7 @@ class PlayerQueuesController(CoreController):
         - insert_at_index: insert the item(s) at this index
         - keep_remaining: keep the remaining items after the insert
         - shuffle: (re)shuffle the items after insert index
+        - keep_first: keep the first new item pinned at the front when shuffling
         """
         prev_items = self._queue_items[queue_id][:insert_at_index] if keep_played else []
         next_items = queue_items
@@ -1775,7 +1785,12 @@ class PlayerQueuesController(CoreController):
             item.sort_index += insert_at_index + index
         # (re)shuffle the final batch if needed
         if shuffle:
-            next_items = await _smart_shuffle(next_items)
+            # when a specific start item was requested, keep it pinned at the front so
+            # playback begins with the user's chosen track and only the rest is shuffled
+            if keep_first and next_items:
+                next_items = [next_items[0], *await _smart_shuffle(next_items[1:])]
+            else:
+                next_items = await _smart_shuffle(next_items)
         self.update_items(queue_id, prev_items + next_items)
 
     def update_items(self, queue_id: str, queue_items: list[QueueItem]) -> None:
