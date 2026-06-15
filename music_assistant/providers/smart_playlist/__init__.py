@@ -76,10 +76,12 @@ DYNAMIC_SAMPLE_CACHE_EXPIRATION = 24 * 3600  # 24h; stale entries are still serv
 CONF_AI_DESCRIPTIONS = "ai_descriptions"
 DESCRIPTION_PREFIX = "[Smart Playlist] "
 
-SUPPORTED_FEATURES: set[ProviderFeature] = {
-    ProviderFeature.BROWSE,
-    ProviderFeature.RECOMMENDATIONS,
-}
+SUPPORTED_FEATURES: frozenset[ProviderFeature] = frozenset(
+    {
+        ProviderFeature.BROWSE,
+        ProviderFeature.RECOMMENDATIONS,
+    }
+)
 
 
 async def setup(

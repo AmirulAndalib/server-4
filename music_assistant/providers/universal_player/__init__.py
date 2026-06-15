@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from music_assistant import MusicAssistant
     from music_assistant.models import ProviderInstanceType
 
-SUPPORTED_FEATURES: set[ProviderFeature] = {ProviderFeature.REMOVE_PLAYER}
+SUPPORTED_FEATURES: frozenset[ProviderFeature] = frozenset({ProviderFeature.REMOVE_PLAYER})
 
 
 async def setup(

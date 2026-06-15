@@ -95,7 +95,7 @@ PARTY_GUEST_DISPLAY_NAME = "Party Guest"
 ATTR_PARTY_GUEST = "party_guest"
 ATTR_PARTY_BOOSTED = "party_boosted"
 
-SUPPORTED_FEATURES: set[ProviderFeature] = set()
+SUPPORTED_FEATURES: frozenset[ProviderFeature] = frozenset()
 
 
 @dataclass
@@ -387,7 +387,7 @@ class PartyPlugin(PluginProvider):
         mass: MusicAssistant,
         manifest: ProviderManifest,
         config: ProviderConfig,
-        supported_features: set[ProviderFeature],
+        supported_features: frozenset[ProviderFeature],
     ) -> None:
         """Initialize the Party plugin."""
         super().__init__(mass, manifest, config, supported_features)

@@ -172,7 +172,7 @@ class DigitallyIncorporatedProvider(MusicProvider):
         mass: MusicAssistant,
         manifest: ProviderManifest,
         config: ProviderConfig,
-        supported_features: set[ProviderFeature],
+        supported_features: frozenset[ProviderFeature],
     ) -> None:
         """Initialize Digitally Incorporated provider."""
         super().__init__(mass, manifest, config, supported_features)

@@ -27,7 +27,7 @@ class ProviderModuleType(Protocol):
     """Model for a provider module to support type hints."""
 
     """Return the (base) features supported by this Provider."""
-    SUPPORTED_FEATURES: set[ProviderFeature]
+    SUPPORTED_FEATURES: frozenset[ProviderFeature]
 
     @staticmethod
     async def setup(

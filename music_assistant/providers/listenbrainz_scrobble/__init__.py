@@ -27,8 +27,8 @@ from music_assistant.models.plugin import PluginProvider
 CONF_USER_TOKEN = "_user_token"
 CONF_API_BASE_URL = "api_base_url"
 LISTENBRAINZ_API_URL = "https://api.listenbrainz.org"
-SUPPORTED_FEATURES: set[ProviderFeature] = (
-    set()
+SUPPORTED_FEATURES: frozenset[ProviderFeature] = (
+    frozenset()
 )  # we don't have any special supported features (yet)
 SUPPORTED_SCROBBLE_MEDIA_TYPES: Final[frozenset[MediaType]] = frozenset({MediaType.TRACK})
 

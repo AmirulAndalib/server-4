@@ -89,7 +89,7 @@ class AcoustidLookupProvider(AudioAnalysisProvider):
         mass: MusicAssistant,
         manifest: ProviderManifest,
         config: ProviderConfig,
-        supported_features: set[ProviderFeature] | None = None,
+        supported_features: frozenset[ProviderFeature] | None = None,
     ) -> None:
         """Initialize the provider with an empty per-session state container."""
         super().__init__(mass, manifest, config, supported_features)

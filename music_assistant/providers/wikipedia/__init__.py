@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from music_assistant.providers.musicbrainz import MusicbrainzProvider, MusicBrainzRelation
 
 
-SUPPORTED_FEATURES: set[ProviderFeature] = {ProviderFeature.ARTIST_METADATA}
+SUPPORTED_FEATURES: frozenset[ProviderFeature] = frozenset({ProviderFeature.ARTIST_METADATA})
 
 WIKIDATA_API_URL = "https://www.wikidata.org/w/api.php"
 

@@ -21,7 +21,7 @@ if TYPE_CHECKING:
     from async_upnp_client.utils import CaseInsensitiveDict
     from music_assistant_models.enums import ProviderFeature
 
-SUPPORTED_FEATURES: set[ProviderFeature] = set()
+SUPPORTED_FEATURES: frozenset[ProviderFeature] = frozenset()
 
 
 class MediaAssistantprovider(PlayerProvider):

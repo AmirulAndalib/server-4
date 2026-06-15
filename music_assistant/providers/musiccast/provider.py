@@ -88,7 +88,7 @@ class MusicCastProvider(PlayerProvider):
         mass: MusicAssistant,
         manifest: ProviderManifest,
         config: ProviderConfig,
-        supported_features: set[ProviderFeature],
+        supported_features: frozenset[ProviderFeature],
     ) -> None:
         """Init."""
         super().__init__(mass, manifest, config, supported_features)

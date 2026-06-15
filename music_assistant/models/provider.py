@@ -33,20 +33,20 @@ class Provider:
         mass: MusicAssistant,
         manifest: ProviderManifest,
         config: ProviderConfig,
-        supported_features: set[ProviderFeature] | None = None,
+        supported_features: frozenset[ProviderFeature] | None = None,
     ) -> None:
         """Initialize MusicProvider."""
         self.mass = mass
         self.manifest = manifest
         self.config = config
-        self._supported_features = supported_features or set()
+        self._supported_features = supported_features or frozenset()
         self._set_log_level_from_config(config)
         self.cache = mass.cache
         self.available = False
         self.initialized = asyncio.Event()
 
     @property
-    def supported_features(self) -> set[ProviderFeature]:
+    def supported_features(self) -> frozenset[ProviderFeature]:
         """Return the features supported by this Provider."""
         # should not be overridden in normal circumstances
         return self._supported_features

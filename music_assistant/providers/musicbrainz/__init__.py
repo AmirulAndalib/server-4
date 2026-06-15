@@ -38,7 +38,7 @@ if TYPE_CHECKING:
 
 LUCENE_SPECIAL = r'([+\-&|!(){}\[\]\^"~*?:\\\/])'
 
-SUPPORTED_FEATURES: set[ProviderFeature] = {ProviderFeature.ARTIST_METADATA}
+SUPPORTED_FEATURES: frozenset[ProviderFeature] = frozenset({ProviderFeature.ARTIST_METADATA})
 
 # Mapping from MusicBrainz URL relation "type" slug to our LinkType enum.
 # See https://musicbrainz.org/relationships/artist-url for the full set.

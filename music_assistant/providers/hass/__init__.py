@@ -80,7 +80,7 @@ async def setup(
         supported_features.add(ProviderFeature.TTS)
     if config.get_value(CONF_AI_TASK_ENTITY):
         supported_features.add(ProviderFeature.AI_QUERY)
-    return HomeAssistantProvider(mass, manifest, config, supported_features)
+    return HomeAssistantProvider(mass, manifest, config, frozenset(supported_features))
 
 
 async def get_config_entries(

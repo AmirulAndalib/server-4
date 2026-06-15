@@ -70,7 +70,7 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
-SUPPORTED_FEATURES: set[ProviderFeature] = set()
+SUPPORTED_FEATURES: frozenset[ProviderFeature] = frozenset()
 
 
 def _build_status_label(otp_code: str | None, is_cloud_plus: bool, is_registered: bool) -> str:

@@ -54,7 +54,7 @@ class LoudnessAnalysisProvider(AudioAnalysisProvider):
         mass: MusicAssistant,
         manifest: ProviderManifest,
         config: ProviderConfig,
-        supported_features: set[ProviderFeature],
+        supported_features: frozenset[ProviderFeature],
     ) -> None:
         """Initialize the provider."""
         super().__init__(mass, manifest, config, supported_features)

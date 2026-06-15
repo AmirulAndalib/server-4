@@ -60,7 +60,7 @@ ALEXA_LANGUAGE_COMMANDS = {
     "play_audio_default": "ask music assistant to play audio",
 }
 
-SUPPORTED_FEATURES: set[ProviderFeature] = set()  # no special features supported (yet)
+SUPPORTED_FEATURES: frozenset[ProviderFeature] = frozenset()  # no special features supported (yet)
 
 
 async def setup(

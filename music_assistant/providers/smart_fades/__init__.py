@@ -19,7 +19,7 @@ if TYPE_CHECKING:
 
     from .provider import SmartFadesProvider
 
-SUPPORTED_FEATURES: set[ProviderFeature] = set()
+SUPPORTED_FEATURES: frozenset[ProviderFeature] = frozenset()
 
 # Smart Fades runs on-device ML (torch) inference; gate it to capable hardware.
 # 4GB matches the Balanced buffer threshold, the minimum buffer smart crossfade needs.

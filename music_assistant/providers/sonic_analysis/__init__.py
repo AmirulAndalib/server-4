@@ -300,7 +300,7 @@ class SonicAnalysisProvider(AudioAnalysisProvider):
         mass: MusicAssistant,
         manifest: ProviderManifest,
         config: ProviderConfig,
-        supported_features: set[ProviderFeature] | None = None,
+        supported_features: frozenset[ProviderFeature] | None = None,
     ) -> None:
         """Initialize the provider."""
         super().__init__(mass, manifest, config, supported_features)

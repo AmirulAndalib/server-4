@@ -47,7 +47,7 @@ async def setup(
     features: set[ProviderFeature] = {ProviderFeature.REMOVE_PLAYER}
     if grouping_enabled:
         features.add(ProviderFeature.SYNC_PLAYERS)
-    return MSXBridgeProvider(mass, manifest, config, features)
+    return MSXBridgeProvider(mass, manifest, config, frozenset(features))
 
 
 async def get_config_entries(

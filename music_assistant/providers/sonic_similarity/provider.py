@@ -91,7 +91,7 @@ class SonicSimilarityPlugin(PluginProvider):
         mass: MusicAssistant,
         manifest: ProviderManifest,
         config: ProviderConfig,
-        supported_features: set[ProviderFeature] | None = None,
+        supported_features: frozenset[ProviderFeature] | None = None,
     ) -> None:
         """Initialize the Sonic Similarity plugin."""
         super().__init__(mass, manifest, config, supported_features)

@@ -42,7 +42,7 @@ PORT_RANGE_START = 32500
 PORT_RANGE_ATTEMPTS = 100
 
 # No special features needed for this plugin
-SUPPORTED_FEATURES: set[ProviderFeature] = set()
+SUPPORTED_FEATURES: frozenset[ProviderFeature] = frozenset()
 
 
 async def setup(
