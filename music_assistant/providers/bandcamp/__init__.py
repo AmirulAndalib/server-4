@@ -38,9 +38,9 @@ from music_assistant_models.errors import (
     InvalidDataError,
     LoginFailed,
     MediaNotFoundError,
+    RateLimited,
     ResourceTemporarilyUnavailable,
     RetriesExhausted,
-    RateLimited,
 )
 from music_assistant_models.media_items import (
     Album,
