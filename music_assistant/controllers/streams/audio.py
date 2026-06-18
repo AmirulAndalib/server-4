@@ -1041,7 +1041,9 @@ class StreamsAudio:
         temp_file = f"/tmp/{shortuuid.random(20)}.txt"  # noqa: S108
         async with aiofiles.open(temp_file, "w") as f:
             for path in files_list:
-                await f.write(f"file '{path}'\n")
+                # Escape single quotes for the concat demuxer, which uses them as delimiters.
+                escaped_path = path.replace("'", "'\\''")
+                await f.write(f"file '{escaped_path}'\n")
 
         try:
             async for chunk in get_ffmpeg_stream(
